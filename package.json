@@ -85,7 +85,7 @@
     "eslint-plugin-notice": "^0.9.10",
     "eslint-plugin-react-hooks": "^4.3.0",
     "file-loader": "^6.2.0",
-    "formidable": "^1.2.2",
+    "formidable": "^3.2.4",
     "html-webpack-plugin": "^5.3.2",
     "ncp": "^2.0.0",
     "node-stream-zip": "^1.11.3",
