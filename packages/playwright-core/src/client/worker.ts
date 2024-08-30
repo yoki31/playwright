@@ -15,17 +15,20 @@
  */
 
 import { Events } from './events';
-import * as channels from '../protocol/channels';
+import type * as channels from '@protocol/channels';
 import { ChannelOwner } from './channelOwner';
 import { assertMaxArguments, JSHandle, parseResult, serializeArgument } from './jsHandle';
-import { Page } from './page';
-import { BrowserContext } from './browserContext';
-import * as api from '../../types/types';
-import * as structs from '../../types/structs';
+import type { Page } from './page';
+import type { BrowserContext } from './browserContext';
+import type * as api from '../../types/types';
+import type * as structs from '../../types/structs';
+import { LongStandingScope } from '../utils';
+import { TargetClosedError } from './errors';
 
 export class Worker extends ChannelOwner<channels.WorkerChannel> implements api.Worker {
   _page: Page | undefined;  // Set for web workers.
   _context: BrowserContext | undefined;  // Set for service workers.
+  readonly _closedScope = new LongStandingScope();
 
   static from(worker: channels.WorkerChannel): Worker {
     return (worker as any)._object;
@@ -40,6 +43,7 @@ export class Worker extends ChannelOwner<channels.WorkerChannel> implements api.
         this._context._serviceWorkers.delete(this);
       this.emit(Events.Worker.Close, this);
     });
+    this.once(Events.Worker.Close, () => this._closedScope.close(this._page?._closeErrorWithReason() || new TargetClosedError()));
   }
 
   url(): string {

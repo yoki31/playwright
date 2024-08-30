@@ -15,8 +15,9 @@
  * limitations under the License.
  */
 
-import { Size, Point, Rect, TimeoutOptions } from '../common/types';
-export { Size, Point, Rect, Quad, URLMatch, TimeoutOptions } from '../common/types';
+import type { Size, Point, TimeoutOptions, HeadersArray } from '../common/types';
+export type { Size, Point, Rect, Quad, TimeoutOptions, HeadersArray } from '../common/types';
+import type * as channels from '@protocol/channels';
 
 export type StrictOptions = {
   strict?: boolean,
@@ -24,7 +25,7 @@ export type StrictOptions = {
 
 export type QueryOnSelectorOptions = StrictOptions & TimeoutOptions;
 
-export type WaitForElementOptions = TimeoutOptions & StrictOptions & { state?: 'attached' | 'detached' | 'visible' | 'hidden' };
+export type WaitForElementOptions = TimeoutOptions & StrictOptions & { state?: 'attached' | 'detached' | 'visible' | 'hidden' } & { omitReturnValue?: boolean };
 
 export type WaitForFunctionOptions = TimeoutOptions & { pollingInterval?: number };
 
@@ -35,27 +36,12 @@ export type NavigateOptions = TimeoutOptions & {
   waitUntil?: LifecycleEvent,
 };
 
-export type NavigatingActionWaitOptions = TimeoutOptions & StrictOptions & {
-  noWaitAfter?: boolean,
-};
-
-export type ForceOptions = {
+export type CommonActionOptions = TimeoutOptions & StrictOptions & {
   force?: boolean,
 };
 
-export type PointerActionWaitOptions = TimeoutOptions & ForceOptions & StrictOptions & {
+export type PointerActionWaitOptions = CommonActionOptions & {
   trial?: boolean;
-};
-
-export type ElementScreenshotOptions = TimeoutOptions & {
-  type?: 'png' | 'jpeg',
-  quality?: number,
-  omitBackground?: boolean,
-};
-
-export type ScreenshotOptions = ElementScreenshotOptions & {
-  fullPage?: boolean,
-  clip?: Rect,
 };
 
 export type PageScreencastOptions = {
@@ -67,6 +53,8 @@ export type PageScreencastOptions = {
 export type Credentials = {
   username: string;
   password: string;
+  origin?: string;
+  sendImmediately?: boolean;
 };
 
 export type Geolocation = {
@@ -85,19 +73,16 @@ export type FilePayload = {
   name: string,
   mimeType: string,
   buffer: string,
+  lastModifiedMs?: number,
 };
 
-export type MediaType = 'screen' | 'print';
-export const mediaTypes: Set<MediaType> = new Set(['screen', 'print']);
+export type MediaType = 'screen' | 'print' | 'no-override';
 
-export type ColorScheme = 'dark' | 'light' | 'no-preference';
-export const colorSchemes: Set<ColorScheme> = new Set(['dark', 'light', 'no-preference']);
+export type ColorScheme = 'dark' | 'light' | 'no-preference' | 'no-override';
 
-export type ReducedMotion = 'no-preference' | 'reduce';
-export const reducedMotions: Set<ReducedMotion> = new Set(['no-preference', 'reduce']);
+export type ReducedMotion = 'no-preference' | 'reduce' | 'no-override';
 
-export type ForcedColors = 'active' | 'none';
-export const forcedColors: Set<ForcedColors> = new Set(['active', 'none']);
+export type ForcedColors = 'active' | 'none' | 'no-override';
 
 export type DeviceDescriptor = {
   userAgent: string,
@@ -109,56 +94,6 @@ export type DeviceDescriptor = {
 };
 export type Devices = { [name: string]: DeviceDescriptor };
 
-export type PDFOptions = {
-  scale?: number,
-  displayHeaderFooter?: boolean,
-  headerTemplate?: string,
-  footerTemplate?: string,
-  printBackground?: boolean,
-  landscape?: boolean,
-  pageRanges?: string,
-  format?: string,
-  width?: string,
-  height?: string,
-  preferCSSPageSize?: boolean,
-  margin?: {top?: string, bottom?: string, left?: string, right?: string},
-};
-
-export type CSSCoverageOptions = {
-  resetOnNavigation?: boolean,
-};
-
-export type JSCoverageOptions = {
-  resetOnNavigation?: boolean,
-  reportAnonymousScripts?: boolean,
-};
-
-export type JSRange = {
-  startOffset: number,
-  endOffset: number,
-  count: number
-};
-
-export type CSSCoverageEntry = {
-  url: string,
-  text?: string,
-  ranges: {
-    start: number,
-    end: number
-  }[]
-};
-
-export type JSCoverageEntry = {
-  url: string,
-  scriptId: string,
-  source?: string,
-  functions: {
-    functionName: string,
-    isBlockCoverage: boolean,
-    ranges: JSRange[]
-  }[]
-};
-
 export type ProxySettings = {
   server: string,
   bypass?: string,
@@ -167,10 +102,11 @@ export type ProxySettings = {
 };
 
 export type KeyboardModifier = 'Alt' | 'Control' | 'Meta' | 'Shift';
+export type SmartKeyboardModifier = KeyboardModifier |  'ControlOrMeta';
 export type MouseButton = 'left' | 'right' | 'middle';
 
 export type PointerActionOptions = {
-  modifiers?: KeyboardModifier[];
+  modifiers?: SmartKeyboardModifier[];
   position?: Point;
 };
 
@@ -193,8 +129,6 @@ export type MouseMultiClickOptions = PointerActionOptions & {
 
 export type World = 'main' | 'utility';
 
-export type HeadersArray = { name: string, value: string }[];
-
 export type GotoOptions = NavigateOptions & {
   referer?: string,
 };
@@ -211,169 +145,17 @@ export type NormalizedContinueOverrides = {
   method?: string,
   headers?: HeadersArray,
   postData?: Buffer,
-};
-
-export type NetworkCookie = {
-  name: string,
-  value: string,
-  domain: string,
-  path: string,
-  expires: number,
-  httpOnly: boolean,
-  secure: boolean,
-  sameSite: 'Strict' | 'Lax' | 'None'
-};
-
-export type SetNetworkCookieParam = {
-  name: string,
-  value: string,
-  url?: string,
-  domain?: string,
-  path?: string,
-  expires?: number,
-  httpOnly?: boolean,
-  secure?: boolean,
-  sameSite?: 'Strict' | 'Lax' | 'None'
+  isFallback: boolean,
 };
 
 export type EmulatedSize = { viewport: Size, screen: Size };
 
-export type BrowserContextOptions = {
-  viewport?: Size,
-  screen?: Size,
-  noDefaultViewport?: boolean,
-  ignoreHTTPSErrors?: boolean,
-  javaScriptEnabled?: boolean,
-  bypassCSP?: boolean,
-  userAgent?: string,
-  locale?: string,
-  timezoneId?: string,
-  geolocation?: Geolocation,
-  permissions?: string[],
-  extraHTTPHeaders?: HeadersArray,
-  offline?: boolean,
-  httpCredentials?: Credentials,
-  deviceScaleFactor?: number,
-  isMobile?: boolean,
-  hasTouch?: boolean,
-  colorScheme?: ColorScheme,
-  reducedMotion?: ReducedMotion,
-  forcedColors?: ForcedColors,
-  acceptDownloads?: boolean,
-  recordVideo?: {
-    dir: string,
-    size?: Size,
-  },
-  recordHar?: {
-    omitContent?: boolean,
-    path: string
-  },
-  strictSelectors?: boolean,
-  proxy?: ProxySettings,
-  baseURL?: string,
-};
-
-export type EnvArray = { name: string, value: string }[];
-
-type LaunchOptionsBase = {
-  channel?: string,
-  executablePath?: string,
-  args?: string[],
-  ignoreDefaultArgs?: string[],
-  ignoreAllDefaultArgs?: boolean,
-  handleSIGINT?: boolean,
-  handleSIGTERM?: boolean,
-  handleSIGHUP?: boolean,
-  timeout?: number,
-  env?: EnvArray,
-  headless?: boolean,
-  devtools?: boolean,
-  proxy?: ProxySettings,
-  downloadsPath?: string,
-  chromiumSandbox?: boolean,
-  slowMo?: number,
-  useWebSocket?: boolean,
-  tracesDir?: string,
-};
-export type LaunchOptions = LaunchOptionsBase & {
-  firefoxUserPrefs?: { [key: string]: string | number | boolean },
-};
-export type LaunchPersistentOptions = LaunchOptionsBase & BrowserContextOptions;
+export type LaunchOptions = channels.BrowserTypeLaunchOptions & { useWebSocket?: boolean };
 
 export type ProtocolLogger = (direction: 'send' | 'receive', message: object) => void;
-
-export type SerializedAXNode = {
-  role: string,
-  name: string,
-  valueString?: string,
-  valueNumber?: number,
-  description?: string,
-
-  keyshortcuts?: string,
-  roledescription?: string,
-  valuetext?: string,
-
-  disabled?: boolean,
-  expanded?: boolean,
-  focused?: boolean,
-  modal?: boolean,
-  multiline?: boolean,
-  multiselectable?: boolean,
-  readonly?: boolean,
-  required?: boolean,
-  selected?: boolean,
-
-  checked?: 'checked' | 'unchecked' | 'mixed',
-  pressed?: 'pressed' | 'released' | 'mixed',
-
-  level?: number,
-  valuemin?: number,
-  valuemax?: number,
-
-  autocomplete?: string,
-  haspopup?: string,
-  invalid?: string,
-  orientation?: string,
-
-  children?: SerializedAXNode[]
-};
 
 export type ConsoleMessageLocation = {
   url: string,
   lineNumber: number,
   columnNumber: number,
-};
-
-export type Error = {
-  message: string,
-  name: string,
-  stack?: string,
-};
-
-export type NameValueList = {
-  name: string;
-  value: string;
-}[];
-
-export type OriginStorage = {
-  origin: string;
-  localStorage: NameValueList;
-};
-
-export type StorageState = {
-  cookies: NetworkCookie[],
-  origins: OriginStorage[]
-};
-
-export type SetStorageState = {
-  cookies?: SetNetworkCookieParam[],
-  origins?: OriginStorage[]
-};
-
-export type APIResponse = {
-  url: string,
-  status: number,
-  statusText: string,
-  headers: HeadersArray,
-  body: Buffer,
 };

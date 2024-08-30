@@ -8,6 +8,10 @@ export module Protocol {
       browserContextId?: string;
       openerId?: string;
     };
+    export type UserPreference = {
+      name: string;
+      value: any;
+    };
     export type CookieOptions = {
       name: string;
       value: string;
@@ -57,6 +61,7 @@ export module Protocol {
       uuid: string;
       browserContextId?: string;
       pageTargetId: string;
+      frameId: string;
       url: string;
       suggestedFileName: string;
     }
@@ -70,6 +75,10 @@ export module Protocol {
     }
     export type enableParameters = {
       attachToDefaultContext: boolean;
+      userPrefs?: {
+        name: string;
+        value: any;
+      }[];
     };
     export type enableReturnValue = void;
     export type createBrowserContextParameters = {
@@ -103,6 +112,8 @@ export module Protocol {
       }[];
     };
     export type setExtraHTTPHeadersReturnValue = void;
+    export type clearCacheParameters = void;
+    export type clearCacheReturnValue = void;
     export type setBrowserProxyParameters = {
       type: ("http"|"https"|"socks"|"socks4");
       bypass: string[];
@@ -127,6 +138,7 @@ export module Protocol {
       credentials: {
         username: string;
         password: string;
+        origin?: string;
       }|null;
     };
     export type setHTTPCredentialsReturnValue = void;
@@ -135,6 +147,11 @@ export module Protocol {
       enabled: boolean;
     };
     export type setRequestInterceptionReturnValue = void;
+    export type setCacheDisabledParameters = {
+      browserContextId?: string;
+      cacheDisabled: boolean;
+    };
+    export type setCacheDisabledReturnValue = void;
     export type setGeolocationOverrideParameters = {
       browserContextId?: string;
       geolocation: {
@@ -203,16 +220,14 @@ export module Protocol {
       }|null;
     };
     export type setDefaultViewportReturnValue = void;
-    export type setScrollbarsHiddenParameters = {
+    export type setInitScriptsParameters = {
       browserContextId?: string;
-      hidden: boolean;
+      scripts: {
+        script: string;
+        worldName?: string;
+      }[];
     };
-    export type setScrollbarsHiddenReturnValue = void;
-    export type addScriptToEvaluateOnNewDocumentParameters = {
-      browserContextId?: string;
-      script: string;
-    };
-    export type addScriptToEvaluateOnNewDocumentReturnValue = void;
+    export type setInitScriptsReturnValue = void;
     export type addBindingParameters = {
       browserContextId?: string;
       worldName?: string;
@@ -354,6 +369,10 @@ export module Protocol {
       width: number;
       height: number;
     };
+    export type InitScript = {
+      script: string;
+      worldName?: string;
+    };
     export type readyPayload = {
     }
     export type crashedPayload = {
@@ -377,7 +396,6 @@ export module Protocol {
     export type navigationStartedPayload = {
       frameId: string;
       navigationId: string;
-      url: string;
     }
     export type navigationCommittedPayload = {
       frameId: string;
@@ -528,11 +546,13 @@ export module Protocol {
       };
     };
     export type scrollIntoViewIfNeededReturnValue = void;
-    export type addScriptToEvaluateOnNewDocumentParameters = {
-      script: string;
-      worldName?: string;
+    export type setInitScriptsParameters = {
+      scripts: {
+        script: string;
+        worldName?: string;
+      }[];
     };
-    export type addScriptToEvaluateOnNewDocumentReturnValue = void;
+    export type setInitScriptsReturnValue = void;
     export type navigateParameters = {
       frameId: string;
       url: string;
@@ -540,7 +560,6 @@ export module Protocol {
     };
     export type navigateReturnValue = {
       navigationId: string|null;
-      navigationURL: string|null;
     };
     export type goBackParameters = {
       frameId: string;
@@ -555,12 +574,11 @@ export module Protocol {
       success: boolean;
     };
     export type reloadParameters = {
-      frameId: string;
     };
     export type reloadReturnValue = void;
     export type adoptNodeParameters = {
       frameId: string;
-      objectId: string;
+      objectId?: string;
       executionContextId: string;
     };
     export type adoptNodeReturnValue = {
@@ -574,12 +592,13 @@ export module Protocol {
     };
     export type screenshotParameters = {
       mimeType: ("image/png"|"image/jpeg");
-      clip?: {
+      clip: {
         x: number;
         y: number;
         width: number;
         height: number;
       };
+      quality?: number;
       omitDeviceScaleFactor?: boolean;
     };
     export type screenshotReturnValue = {
@@ -641,7 +660,7 @@ export module Protocol {
     };
     export type dispatchTapEventReturnValue = void;
     export type dispatchMouseEventParameters = {
-      type: string;
+      type: ("mousedown"|"mousemove"|"mouseup");
       button: number;
       x: number;
       y: number;
@@ -744,6 +763,8 @@ export module Protocol {
     export type executionContextDestroyedPayload = {
       executionContextId: string;
     }
+    export type executionContextsClearedPayload = {
+    }
     export type consolePayload = {
       executionContextId: string;
       args: {
@@ -833,6 +854,7 @@ export module Protocol {
     export type HTTPCredentials = {
       username: string;
       password: string;
+      origin?: string;
     };
     export type SecurityDetails = {
       protocol: string;
@@ -895,6 +917,7 @@ export module Protocol {
         requestStart: number;
         responseStart: number;
       };
+      fromServiceWorker: boolean;
     }
     export type requestFinishedPayload = {
       requestId: string;
@@ -962,7 +985,7 @@ export module Protocol {
       focused?: boolean;
       pressed?: boolean;
       focusable?: boolean;
-      haspopup?: boolean;
+      haspopup?: string;
       required?: boolean;
       invalid?: boolean;
       modal?: boolean;
@@ -997,7 +1020,7 @@ export module Protocol {
         focused?: boolean;
         pressed?: boolean;
         focusable?: boolean;
-        haspopup?: boolean;
+        haspopup?: string;
         required?: boolean;
         invalid?: boolean;
         modal?: boolean;
@@ -1056,6 +1079,7 @@ export module Protocol {
     "Page.screencastFrame": Page.screencastFramePayload;
     "Runtime.executionContextCreated": Runtime.executionContextCreatedPayload;
     "Runtime.executionContextDestroyed": Runtime.executionContextDestroyedPayload;
+    "Runtime.executionContextsCleared": Runtime.executionContextsClearedPayload;
     "Runtime.console": Runtime.consolePayload;
     "Network.requestWillBeSent": Network.requestWillBeSentPayload;
     "Network.responseReceived": Network.responseReceivedPayload;
@@ -1070,10 +1094,12 @@ export module Protocol {
     "Browser.close": Browser.closeParameters;
     "Browser.getInfo": Browser.getInfoParameters;
     "Browser.setExtraHTTPHeaders": Browser.setExtraHTTPHeadersParameters;
+    "Browser.clearCache": Browser.clearCacheParameters;
     "Browser.setBrowserProxy": Browser.setBrowserProxyParameters;
     "Browser.setContextProxy": Browser.setContextProxyParameters;
     "Browser.setHTTPCredentials": Browser.setHTTPCredentialsParameters;
     "Browser.setRequestInterception": Browser.setRequestInterceptionParameters;
+    "Browser.setCacheDisabled": Browser.setCacheDisabledParameters;
     "Browser.setGeolocationOverride": Browser.setGeolocationOverrideParameters;
     "Browser.setUserAgentOverride": Browser.setUserAgentOverrideParameters;
     "Browser.setPlatformOverride": Browser.setPlatformOverrideParameters;
@@ -1085,8 +1111,7 @@ export module Protocol {
     "Browser.setDownloadOptions": Browser.setDownloadOptionsParameters;
     "Browser.setTouchOverride": Browser.setTouchOverrideParameters;
     "Browser.setDefaultViewport": Browser.setDefaultViewportParameters;
-    "Browser.setScrollbarsHidden": Browser.setScrollbarsHiddenParameters;
-    "Browser.addScriptToEvaluateOnNewDocument": Browser.addScriptToEvaluateOnNewDocumentParameters;
+    "Browser.setInitScripts": Browser.setInitScriptsParameters;
     "Browser.addBinding": Browser.addBindingParameters;
     "Browser.grantPermissions": Browser.grantPermissionsParameters;
     "Browser.resetPermissions": Browser.resetPermissionsParameters;
@@ -1108,7 +1133,7 @@ export module Protocol {
     "Page.setCacheDisabled": Page.setCacheDisabledParameters;
     "Page.describeNode": Page.describeNodeParameters;
     "Page.scrollIntoViewIfNeeded": Page.scrollIntoViewIfNeededParameters;
-    "Page.addScriptToEvaluateOnNewDocument": Page.addScriptToEvaluateOnNewDocumentParameters;
+    "Page.setInitScripts": Page.setInitScriptsParameters;
     "Page.navigate": Page.navigateParameters;
     "Page.goBack": Page.goBackParameters;
     "Page.goForward": Page.goForwardParameters;
@@ -1149,10 +1174,12 @@ export module Protocol {
     "Browser.close": Browser.closeReturnValue;
     "Browser.getInfo": Browser.getInfoReturnValue;
     "Browser.setExtraHTTPHeaders": Browser.setExtraHTTPHeadersReturnValue;
+    "Browser.clearCache": Browser.clearCacheReturnValue;
     "Browser.setBrowserProxy": Browser.setBrowserProxyReturnValue;
     "Browser.setContextProxy": Browser.setContextProxyReturnValue;
     "Browser.setHTTPCredentials": Browser.setHTTPCredentialsReturnValue;
     "Browser.setRequestInterception": Browser.setRequestInterceptionReturnValue;
+    "Browser.setCacheDisabled": Browser.setCacheDisabledReturnValue;
     "Browser.setGeolocationOverride": Browser.setGeolocationOverrideReturnValue;
     "Browser.setUserAgentOverride": Browser.setUserAgentOverrideReturnValue;
     "Browser.setPlatformOverride": Browser.setPlatformOverrideReturnValue;
@@ -1164,8 +1191,7 @@ export module Protocol {
     "Browser.setDownloadOptions": Browser.setDownloadOptionsReturnValue;
     "Browser.setTouchOverride": Browser.setTouchOverrideReturnValue;
     "Browser.setDefaultViewport": Browser.setDefaultViewportReturnValue;
-    "Browser.setScrollbarsHidden": Browser.setScrollbarsHiddenReturnValue;
-    "Browser.addScriptToEvaluateOnNewDocument": Browser.addScriptToEvaluateOnNewDocumentReturnValue;
+    "Browser.setInitScripts": Browser.setInitScriptsReturnValue;
     "Browser.addBinding": Browser.addBindingReturnValue;
     "Browser.grantPermissions": Browser.grantPermissionsReturnValue;
     "Browser.resetPermissions": Browser.resetPermissionsReturnValue;
@@ -1187,7 +1213,7 @@ export module Protocol {
     "Page.setCacheDisabled": Page.setCacheDisabledReturnValue;
     "Page.describeNode": Page.describeNodeReturnValue;
     "Page.scrollIntoViewIfNeeded": Page.scrollIntoViewIfNeededReturnValue;
-    "Page.addScriptToEvaluateOnNewDocument": Page.addScriptToEvaluateOnNewDocumentReturnValue;
+    "Page.setInitScripts": Page.setInitScriptsReturnValue;
     "Page.navigate": Page.navigateReturnValue;
     "Page.goBack": Page.goBackReturnValue;
     "Page.goForward": Page.goForwardReturnValue;

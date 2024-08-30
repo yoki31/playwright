@@ -63,14 +63,14 @@ class Runtime {
     if (isWorker) {
       this._registerWorkerConsoleHandler();
     } else {
-      const {Services} = ChromeUtils.import("resource://gre/modules/Services.jsm");
       this._registerConsoleServiceListener(Services);
-      this._registerConsoleObserver(Services);
+      this._registerConsoleAPIListener(Services);
     }
     // We can't use event listener here to be compatible with Worker Global Context.
     // Use plain callbacks instead.
     this.events = {
       onConsoleMessage: createEvent(),
+      onRuntimeError: createEvent(),
       onErrorFromWorker: createEvent(),
       onExecutionContextCreated: createEvent(),
       onExecutionContextDestroyed: createEvent(),
@@ -129,7 +129,7 @@ class Runtime {
 
       observe: message => {
         if (!(message instanceof Ci.nsIScriptError) || !message.outerWindowID ||
-            !message.category || disallowedMessageCategories.has(message.category) || message.hasException) {
+            !message.category || disallowedMessageCategories.has(message.category)) {
           return;
         }
         const errorWindow = Services.wm.getOuterWindowWithId(message.outerWindowID);
@@ -138,48 +138,69 @@ class Runtime {
           return;
         }
         const executionContext = this._windowToExecutionContext.get(errorWindow);
-        if (!executionContext)
+        if (!executionContext) {
           return;
+        }
         const typeNames = {
           [Ci.nsIConsoleMessage.debug]: 'debug',
           [Ci.nsIConsoleMessage.info]: 'info',
           [Ci.nsIConsoleMessage.warn]: 'warn',
           [Ci.nsIConsoleMessage.error]: 'error',
         };
-        emitEvent(this.events.onConsoleMessage, {
-          args: [{
-            value: message.message,
-          }],
-          type: typeNames[message.logLevel],
-          executionContextId: executionContext.id(),
-          location: {
-            lineNumber: message.lineNumber,
-            columnNumber: message.columnNumber,
-            url: message.sourceName,
-          },
-        });
+        if (!message.hasException) {
+          emitEvent(this.events.onConsoleMessage, {
+            args: [{
+              value: message.message,
+            }],
+            type: typeNames[message.logLevel],
+            executionContextId: executionContext.id(),
+            location: {
+              lineNumber: message.lineNumber,
+              columnNumber: message.columnNumber,
+              url: message.sourceName,
+            },
+          });
+        } else {
+          emitEvent(this.events.onRuntimeError, {
+            executionContext,
+            message: message.errorMessage,
+            stack: message.stack.toString(),
+          });
+        }
       },
     };
     Services.console.registerListener(consoleServiceListener);
     this._eventListeners.push(() => Services.console.unregisterListener(consoleServiceListener));
   }
 
-  _registerConsoleObserver(Services) {
-    const consoleObserver = ({wrappedJSObject}, topic, data) => {
+  _registerConsoleAPIListener(Services) {
+    const Ci = Components.interfaces;
+    const Cc = Components.classes;
+    const ConsoleAPIStorage = Cc["@mozilla.org/consoleAPI-storage;1"].getService(Ci.nsIConsoleAPIStorage);
+    const onMessage = ({ wrappedJSObject }) => {
       const executionContext = Array.from(this._executionContexts.values()).find(context => {
         // There is no easy way to determine isolated world context and we normally don't write
         // objects to console from utility worlds so we always return main world context here.
         if (context._isIsolatedWorldContext())
           return false;
         const domWindow = context._domWindow;
-        return domWindow && domWindow.windowGlobalChild.innerWindowId === wrappedJSObject.innerID;
+        try {
+          // `windowGlobalChild` might be dead already; accessing it will throw an error, message in a console,
+          // and infinite recursion.
+          return domWindow && domWindow.windowGlobalChild.innerWindowId === wrappedJSObject.innerID;
+        } catch (e) {
+          return false;
+        }
       });
       if (!executionContext)
         return;
       this._onConsoleMessage(executionContext, wrappedJSObject);
-    };
-    Services.obs.addObserver(consoleObserver, "console-api-log-event");
-    this._eventListeners.push(() => Services.obs.removeObserver(consoleObserver, "console-api-log-event"));
+    }
+    ConsoleAPIStorage.addLogEventListener(
+      onMessage,
+      Cc["@mozilla.org/systemprincipal;1"].createInstance(Ci.nsIPrincipal)
+    );
+    this._eventListeners.push(() => ConsoleAPIStorage.removeLogEventListener(onMessage));
   }
 
   _registerWorkerConsoleHandler() {
@@ -218,8 +239,8 @@ class Runtime {
       return {success: true, obj: obj.promiseValue};
     if (obj.promiseState === 'rejected') {
       const debuggee = executionContext._debuggee;
-      exceptionDetails.text = debuggee.executeInGlobalWithBindings('e.message', {e: obj.promiseReason}).return;
-      exceptionDetails.stack = debuggee.executeInGlobalWithBindings('e.stack', {e: obj.promiseReason}).return;
+      exceptionDetails.text = debuggee.executeInGlobalWithBindings('e.message', {e: obj.promiseReason}, {useInnerBindings: true}).return;
+      exceptionDetails.stack = debuggee.executeInGlobalWithBindings('e.stack', {e: obj.promiseReason}, {useInnerBindings: true}).return;
       return {success: false, obj: null};
     }
     let resolve, reject;
@@ -246,8 +267,8 @@ class Runtime {
       return;
     };
     const debuggee = pendingPromise.executionContext._debuggee;
-    pendingPromise.exceptionDetails.text = debuggee.executeInGlobalWithBindings('e.message', {e: obj.promiseReason}).return;
-    pendingPromise.exceptionDetails.stack = debuggee.executeInGlobalWithBindings('e.stack', {e: obj.promiseReason}).return;
+    pendingPromise.exceptionDetails.text = debuggee.executeInGlobalWithBindings('e.message', {e: obj.promiseReason}, {useInnerBindings: true}).return;
+    pendingPromise.exceptionDetails.stack = debuggee.executeInGlobalWithBindings('e.stack', {e: obj.promiseReason}, {useInnerBindings: true}).return;
     pendingPromise.resolve({success: false, obj: null});
   }
 
@@ -295,8 +316,9 @@ class ExecutionContext {
     this._id = generateId();
     this._auxData = auxData;
     this._jsonStringifyObject = this._debuggee.executeInGlobal(`((stringify, object) => {
-      const oldToJSON = Date.prototype.toJSON;
-      Date.prototype.toJSON = undefined;
+      const oldToJSON = Date.prototype?.toJSON;
+      if (oldToJSON)
+        Date.prototype.toJSON = undefined;
       const oldArrayToJSON = Array.prototype.toJSON;
       const oldArrayHadToJSON = Array.prototype.hasOwnProperty('toJSON');
       if (oldArrayHadToJSON)
@@ -309,7 +331,8 @@ class ExecutionContext {
         return value;
       });
 
-      Date.prototype.toJSON = oldToJSON;
+      if (oldToJSON)
+        Date.prototype.toJSON = oldToJSON;
       if (oldArrayHadToJSON)
         Array.prototype.toJSON = oldArrayToJSON;
 
@@ -351,7 +374,7 @@ class ExecutionContext {
     try {
       this._debuggee.executeInGlobal(script);
     } catch (e) {
-      dump(`ERROR: ${e.message}\n${e.stack}\n`);
+      dump(`WARNING: ${e.message}\n${e.stack}\n`);
     }
   }
 
@@ -418,7 +441,7 @@ class ExecutionContext {
   _instanceOf(debuggerObj, rawObj, className) {
     if (this._domWindow)
       return rawObj instanceof this._domWindow[className];
-    return this._debuggee.executeInGlobalWithBindings('o instanceof this[className]', {o: debuggerObj, className: this._debuggee.makeDebuggeeValue(className)}).return;
+    return this._debuggee.executeInGlobalWithBindings('o instanceof this[className]', {o: debuggerObj, className: this._debuggee.makeDebuggeeValue(className)}, {useInnerBindings: true}).return;
   }
 
   _createRemoteObject(debuggerObj) {
@@ -434,7 +457,7 @@ class ExecutionContext {
         subtype = 'array';
       else if (Object.is(rawObj, null))
         subtype = 'null';
-      else if (this._instanceOf(debuggerObj, rawObj, 'Node'))
+      else if (typeof Node !== 'undefined' && Node.isInstance(rawObj))
         subtype = 'node';
       else if (this._instanceOf(debuggerObj, rawObj, 'RegExp'))
         subtype = 'regexp';
@@ -508,7 +531,7 @@ class ExecutionContext {
   }
 
   _serialize(obj) {
-    const result = this._debuggee.executeInGlobalWithBindings('stringify(e)', {e: obj, stringify: this._jsonStringifyObject});
+    const result = this._debuggee.executeInGlobalWithBindings('stringify(e)', {e: obj, stringify: this._jsonStringifyObject}, {useInnerBindings: true});
     if (result.throw)
       throw new Error('Object is not serializable');
     return result.return === undefined ? undefined : JSON.parse(result.return);
@@ -537,15 +560,12 @@ class ExecutionContext {
   }
 
   _getResult(completionValue, exceptionDetails = {}) {
-    if (!completionValue) {
-      exceptionDetails.text = 'Evaluation terminated!';
-      exceptionDetails.stack = '';
-      return {success: false, obj: null};
-    }
+    if (!completionValue)
+      throw new Error('evaluation terminated');
     if (completionValue.throw) {
-      if (this._debuggee.executeInGlobalWithBindings('e instanceof Error', {e: completionValue.throw}).return) {
-        exceptionDetails.text = this._debuggee.executeInGlobalWithBindings('e.message', {e: completionValue.throw}).return;
-        exceptionDetails.stack = this._debuggee.executeInGlobalWithBindings('e.stack', {e: completionValue.throw}).return;
+      if (this._debuggee.executeInGlobalWithBindings('e instanceof Error', {e: completionValue.throw}, {useInnerBindings: true}).return) {
+        exceptionDetails.text = this._debuggee.executeInGlobalWithBindings('e.message', {e: completionValue.throw}, {useInnerBindings: true}).return;
+        exceptionDetails.stack = this._debuggee.executeInGlobalWithBindings('e.stack', {e: completionValue.throw}, {useInnerBindings: true}).return;
       } else {
         exceptionDetails.value = this._serialize(completionValue.throw);
       }

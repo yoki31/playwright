@@ -15,11 +15,14 @@
  * limitations under the License.
  */
 
-import { EventEmitter } from 'events';
-import * as types from './types';
-import { Progress } from './progress';
+import type { EventEmitter } from 'events';
+import type * as types from './types';
+import type { Progress } from './progress';
 import { debugLogger } from '../utils/debugLogger';
-import { eventsHelper, RegisteredListener } from '../utils/eventsHelper';
+import type { RegisteredListener } from '../utils/eventsHelper';
+import { eventsHelper } from '../utils/eventsHelper';
+
+const MAX_LOG_LENGTH = process.env.MAX_LOG_LENGTH ? +process.env.MAX_LOG_LENGTH : Infinity;
 
 class Helper {
   static completeUserURL(urlString: string): string {
@@ -83,15 +86,19 @@ class Helper {
     return (direction: 'send' | 'receive', message: object) => {
       if (protocolLogger)
         protocolLogger(direction, message);
-      if (debugLogger.isEnabled('protocol'))
-        debugLogger.log('protocol', (direction === 'send' ? 'SEND ► ' : '◀ RECV ') + JSON.stringify(message));
+      if (debugLogger.isEnabled('protocol')) {
+        let text = JSON.stringify(message);
+        if (text.length > MAX_LOG_LENGTH)
+          text = text.substring(0, MAX_LOG_LENGTH / 2) + ' <<<<<( LOG TRUNCATED )>>>>> ' + text.substring(text.length - MAX_LOG_LENGTH / 2);
+        debugLogger.log('protocol', (direction === 'send' ? 'SEND ► ' : '◀ RECV ') + text);
+      }
     };
   }
 
-  static formatBrowserLogs(logs: string[]) {
-    if (!logs.length)
+  static formatBrowserLogs(logs: string[], disconnectReason?: string) {
+    if (!disconnectReason && !logs.length)
       return '';
-    return '\n' + '='.repeat(20) + ' Browser output: ' + '='.repeat(20) + '\n' + logs.join('\n');
+    return '\n' + (disconnectReason ? disconnectReason + '\n' : '') + logs.join('\n');
   }
 }
 

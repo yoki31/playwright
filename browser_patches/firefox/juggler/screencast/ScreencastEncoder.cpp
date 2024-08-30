@@ -39,11 +39,23 @@
 #include "nsIThread.h"
 #include "nsThreadUtils.h"
 #include "WebMFileWriter.h"
-#include "webrtc/api/video/video_frame.h"
+#include "api/video/video_frame.h"
 
 namespace mozilla {
 
 namespace {
+
+struct VpxCodecDeleter {
+  void operator()(vpx_codec_ctx_t* codec) {
+    if (codec) {
+        vpx_codec_err_t ret = vpx_codec_destroy(codec);
+        if (ret != VPX_CODEC_OK)
+            fprintf(stderr, "Failed to destroy codec: %s\n", vpx_codec_error(codec));
+    }
+  }
+};
+
+using ScopedVpxCodec = std::unique_ptr<vpx_codec_ctx_t, VpxCodecDeleter>;
 
 // Number of timebase unints per one frame.
 constexpr int timeScale = 1000;
@@ -133,11 +145,33 @@ public:
         uint8_t* u_data = image->planes[VPX_PLANE_U];
         uint8_t* v_data = image->planes[VPX_PLANE_V];
 
-        double src_width = src->width() - m_margin.LeftRight();
-        double src_height = src->height() - m_margin.top;
-        // YUV offsets must be even.
-        int yuvTopOffset = m_margin.top & 1 ? m_margin.top + 1 : m_margin.top;
-        int yuvLeftOffset = m_margin.left & 1 ? m_margin.left + 1 : m_margin.left;
+        /**
+         * Let's say we have the following image of 6x3 pixels (same number = same pixel value):
+         *  112233
+         *  112233
+         *  445566
+         * In I420 format (see https://en.wikipedia.org/wiki/YUV), the image will have the following data planes:
+         *   Y [stride_Y = 6]:
+         *    112233
+         *    112233
+         *    445566
+         *   U [stride_U = 3] - this plane has aggregate for each 2x2 pixels:
+         *    123
+         *    456
+         *   V [stride_V = 3] - this plane has aggregate for each 2x2 pixels:
+         *    123
+         *    456
+         *
+         * To crop this image efficiently, we can move src_Y/U/V pointer and
+         * adjust the src_width and src_height. However, we must cut off only **even**
+         * amount of lines and columns to retain semantic of U and V planes which
+         * contain only 1/4 of pixel information.
+         */
+        int yuvTopOffset = m_margin.top + (m_margin.top & 1);
+        int yuvLeftOffset = m_margin.left + (m_margin.left & 1);
+
+        double src_width = src->width() - yuvLeftOffset;
+        double src_height = src->height() - yuvTopOffset;
 
         if (src_width > image->w || src_height > image->h) {
           double scale = std::min(image->w / src_width, image->h / src_height);
@@ -183,8 +217,8 @@ private:
 
 class ScreencastEncoder::VPXCodec {
 public:
-    VPXCodec(vpx_codec_ctx_t codec, vpx_codec_enc_cfg_t cfg, FILE* file)
-        : m_codec(codec)
+    VPXCodec(ScopedVpxCodec codec, vpx_codec_enc_cfg_t cfg, FILE* file)
+        : m_codec(std::move(codec))
         , m_cfg(cfg)
         , m_file(file)
         , m_writer(new WebMFileWriter(file, &m_cfg))
@@ -233,14 +267,14 @@ private:
         vpx_codec_iter_t iter = nullptr;
         const vpx_codec_cx_pkt_t *pkt = nullptr;
         int flags = 0;
-        const vpx_codec_err_t res = vpx_codec_encode(&m_codec, img, m_pts, duration, flags, VPX_DL_REALTIME);
+        const vpx_codec_err_t res = vpx_codec_encode(m_codec.get(), img, m_pts, duration, flags, VPX_DL_REALTIME);
         if (res != VPX_CODEC_OK) {
-            fprintf(stderr, "Failed to encode frame: %s\n", vpx_codec_error(&m_codec));
+            fprintf(stderr, "Failed to encode frame: %s\n", vpx_codec_error(m_codec.get()));
             return false;
         }
 
         bool gotPkts = false;
-        while ((pkt = vpx_codec_get_cx_data(&m_codec, &iter)) != nullptr) {
+        while ((pkt = vpx_codec_get_cx_data(m_codec.get(), &iter)) != nullptr) {
             gotPkts = true;
 
             if (pkt->kind == VPX_CODEC_CX_FRAME_PKT) {
@@ -266,7 +300,7 @@ private:
     }
 
     RefPtr<nsIThread> m_encoderQueue;
-    vpx_codec_ctx_t m_codec;
+    ScopedVpxCodec m_codec;
     vpx_codec_enc_cfg_t m_cfg;
     FILE* m_file { nullptr };
     std::unique_ptr<WebMFileWriter> m_writer;
@@ -277,7 +311,7 @@ private:
     std::unique_ptr<vpx_image_t> m_image;
 };
 
-ScreencastEncoder::ScreencastEncoder(std::unique_ptr<VPXCodec>&& vpxCodec, const gfx::IntMargin& margin)
+ScreencastEncoder::ScreencastEncoder(std::unique_ptr<VPXCodec> vpxCodec, const gfx::IntMargin& margin)
     : m_vpxCodec(std::move(vpxCodec))
     , m_margin(margin)
 {
@@ -287,7 +321,7 @@ ScreencastEncoder::~ScreencastEncoder()
 {
 }
 
-RefPtr<ScreencastEncoder> ScreencastEncoder::create(nsCString& errorString, const nsCString& filePath, int width, int height, const gfx::IntMargin& margin)
+std::unique_ptr<ScreencastEncoder> ScreencastEncoder::create(nsCString& errorString, const nsCString& filePath, int width, int height, const gfx::IntMargin& margin)
 {
     vpx_codec_iface_t* codec_interface = vpx_codec_vp8_cx();
     if (!codec_interface) {
@@ -314,9 +348,9 @@ RefPtr<ScreencastEncoder> ScreencastEncoder::create(nsCString& errorString, cons
     cfg.g_timebase.den = fps * timeScale;
     cfg.g_error_resilient = VPX_ERROR_RESILIENT_DEFAULT;
 
-    vpx_codec_ctx_t codec;
-    if (vpx_codec_enc_init(&codec, codec_interface, &cfg, 0)) {
-        errorString.AppendPrintf("Failed to initialize encoder: %s", vpx_codec_error(&codec));
+    ScopedVpxCodec codec(new vpx_codec_ctx_t);
+    if (vpx_codec_enc_init(codec.get(), codec_interface, &cfg, 0)) {
+        errorString.AppendPrintf("Failed to initialize encoder: %s", vpx_codec_error(codec.get()));
         return nullptr;
     }
 
@@ -326,9 +360,9 @@ RefPtr<ScreencastEncoder> ScreencastEncoder::create(nsCString& errorString, cons
         return nullptr;
     }
 
-    std::unique_ptr<VPXCodec> vpxCodec(new VPXCodec(codec, cfg, file));
+    std::unique_ptr<VPXCodec> vpxCodec(new VPXCodec(std::move(codec), cfg, file));
     // fprintf(stderr, "ScreencastEncoder initialized with: %s\n", vpx_codec_iface_name(codec_interface));
-    return new ScreencastEncoder(std::move(vpxCodec), margin);
+    return std::make_unique<ScreencastEncoder>(std::move(vpxCodec), margin);
 }
 
 void ScreencastEncoder::flushLastFrame()

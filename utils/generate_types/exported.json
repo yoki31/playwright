@@ -7,5 +7,7 @@
   "BrowserNewContextOptionsViewport": "ViewportSize",
   "BrowserNewContextOptionsGeolocation": "Geolocation",
   "BrowserNewContextOptionsHttpCredentials": "HTTPCredentials",
-  "PageScreenshotOptions": "PageScreenshotOptions"
+  "PageScreenshotOptions": "PageScreenshotOptions",
+  "LocatorScreenshotOptions": "LocatorScreenshotOptions",
+  "PageAssertionsToHaveScreenshotOptions": "PageAssertionsToHaveScreenshotOptions"
 }

@@ -14,15 +14,17 @@
   limitations under the License.
 */
 
-import type { TestCase, TestFile } from '@playwright/test/src/reporters/html';
+import type { FilteredStats, TestCase, TestFile, TestFileSummary } from './types';
 import * as React from 'react';
 import './colors.css';
 import './common.css';
 import { Filter } from './filter';
 import { HeaderView } from './headerView';
 import { Route } from './links';
-import { LoadedReport } from './loadedReport';
+import type { LoadedReport } from './loadedReport';
 import './reportView.css';
+import type { Metainfo } from './metadataView';
+import { MetadataView } from './metadataView';
 import { TestCaseView } from './testCaseView';
 import { TestFilesView } from './testFilesView';
 import './theme.css';
@@ -33,6 +35,10 @@ declare global {
   }
 }
 
+// These are extracted to preserve the function identity between renders to avoid re-triggering effects.
+const testFilesRoutePredicate = (params: URLSearchParams) => !params.has('testId');
+const testCaseRoutePredicate = (params: URLSearchParams) => params.has('testId');
+
 export const ReportView: React.FC<{
   report: LoadedReport | undefined,
 }> = ({ report }) => {
@@ -41,20 +47,26 @@ export const ReportView: React.FC<{
   const [filterText, setFilterText] = React.useState(searchParams.get('q') || '');
 
   const filter = React.useMemo(() => Filter.parse(filterText), [filterText]);
+  const filteredStats = React.useMemo(() => computeStats(report?.json().files || [], filter), [report, filter]);
 
-  return <div className='htmlreport vbox px-4'>
-    {report?.json() && <HeaderView stats={report.json().stats} filterText={filterText} setFilterText={setFilterText}></HeaderView>}
-    {<>
-      <Route params=''>
-        <TestFilesView report={report?.json()} filter={filter} expandedFiles={expandedFiles} setExpandedFiles={setExpandedFiles}></TestFilesView>
+  return <div className='htmlreport vbox px-4 pb-4'>
+    <main>
+      {report?.json() && <HeaderView stats={report.json().stats} filterText={filterText} setFilterText={setFilterText}></HeaderView>}
+      {report?.json().metadata && <MetadataView {...report?.json().metadata as Metainfo} />}
+      <Route predicate={testFilesRoutePredicate}>
+        <TestFilesView
+          report={report?.json()}
+          filter={filter}
+          expandedFiles={expandedFiles}
+          setExpandedFiles={setExpandedFiles}
+          projectNames={report?.json().projectNames || []}
+          filteredStats={filteredStats}
+        />
       </Route>
-      <Route params='q'>
-        <TestFilesView report={report?.json()} filter={filter} expandedFiles={expandedFiles} setExpandedFiles={setExpandedFiles}></TestFilesView>
-      </Route>
-      <Route params='testId'>
+      <Route predicate={testCaseRoutePredicate}>
         {!!report && <TestCaseViewLoader report={report}></TestCaseViewLoader>}
       </Route>
-    </>}
+    </main>
   </div>;
 };
 
@@ -64,21 +76,47 @@ const TestCaseViewLoader: React.FC<{
   const searchParams = new URLSearchParams(window.location.hash.slice(1));
   const [test, setTest] = React.useState<TestCase | undefined>();
   const testId = searchParams.get('testId');
+  const anchor = (searchParams.get('anchor') || '') as 'video' | 'diff' | '';
+  const run = +(searchParams.get('run') || '0');
+
+  const testIdToFileIdMap = React.useMemo(() => {
+    const map = new Map<string, string>();
+    for (const file of report.json().files) {
+      for (const test of file.tests)
+        map.set(test.testId, file.fileId);
+    }
+    return map;
+  }, [report]);
+
   React.useEffect(() => {
     (async () => {
       if (!testId || testId === test?.testId)
         return;
-      const fileId = testId.split('-')[0];
+      const fileId = testIdToFileIdMap.get(testId);
       if (!fileId)
         return;
       const file = await report.entry(`${fileId}.json`) as TestFile;
-      for (const t of [...file.tests, ...file.hooks]) {
+      for (const t of file.tests) {
         if (t.testId === testId) {
           setTest(t);
           break;
         }
       }
     })();
-  }, [test, report, testId]);
-  return <TestCaseView projectNames={report.json().projectNames} test={test}></TestCaseView>;
+  }, [test, report, testId, testIdToFileIdMap]);
+  return <TestCaseView projectNames={report.json().projectNames} test={test} anchor={anchor} run={run}></TestCaseView>;
 };
+
+function computeStats(files: TestFileSummary[], filter: Filter): FilteredStats {
+  const stats: FilteredStats = {
+    total: 0,
+    duration: 0,
+  };
+  for (const file of files) {
+    const tests = file.tests.filter(t => filter.matches(t));
+    stats.total += tests.length;
+    for (const test of tests)
+      stats.duration += test.duration;
+  }
+  return stats;
+}

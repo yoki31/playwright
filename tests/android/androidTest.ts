@@ -15,7 +15,7 @@
  */
 
 import { baseTest } from '../config/baseTest';
-import { PageTestFixtures, PageWorkerFixtures } from '../page/pageTestApi';
+import type { PageTestFixtures, PageWorkerFixtures } from '../page/pageTestApi';
 import type { AndroidDevice, BrowserContext } from 'playwright-core';
 export { expect } from '@playwright/test';
 
@@ -38,7 +38,7 @@ export const androidTest = baseTest.extend<PageTestFixtures, AndroidWorkerFixtur
     const browserVersion = (await androidDevice.shell('dumpsys package com.android.chrome'))
         .toString('utf8')
         .split('\n')
-        .find(line => line.includes('versionName='))
+        .find(line => line.includes('versionName='))!
         .trim()
         .split('=')[1];
     await run(browserVersion);
@@ -50,6 +50,8 @@ export const androidTest = baseTest.extend<PageTestFixtures, AndroidWorkerFixtur
 
   isAndroid: [true, { scope: 'worker' }],
   isElectron: [false, { scope: 'worker' }],
+  electronMajorVersion: [0, { scope: 'worker' }],
+  isWebView2: [false, { scope: 'worker' }],
 
   androidContext: [async ({ androidDevice }, run) => {
     const context = await androidDevice.launchBrowser();

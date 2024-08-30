@@ -30,7 +30,7 @@ export module Protocol {
       /**
        * Backtrace that was captured when this `WebAnimation` was created.
        */
-      backtrace?: Console.CallFrame[];
+      stackTrace?: Console.StackTrace;
     }
     export interface Effect {
       startDelay?: number;
@@ -162,7 +162,7 @@ export module Protocol {
       animationId: AnimationId;
     }
     export type requestEffectTargetReturnValue = {
-      nodeId: DOM.NodeId;
+      effectTarget: DOM.Styleable;
     }
     /**
      * Resolves JavaScript `WebAnimation` object for given `AnimationId`.
@@ -536,7 +536,11 @@ export module Protocol {
     /**
      * Pseudo-style identifier (see <code>enum PseudoId</code> in <code>RenderStyleConstants.h</code>).
      */
-    export type PseudoId = "first-line"|"first-letter"|"highlight"|"marker"|"before"|"after"|"selection"|"backdrop"|"scrollbar"|"scrollbar-thumb"|"scrollbar-button"|"scrollbar-track"|"scrollbar-track-piece"|"scrollbar-corner"|"resizer";
+    export type PseudoId = "first-line"|"first-letter"|"grammar-error"|"highlight"|"marker"|"before"|"after"|"selection"|"backdrop"|"spelling-error"|"target-text"|"view-transition"|"view-transition-group"|"view-transition-image-pair"|"view-transition-old"|"view-transition-new"|"-webkit-scrollbar"|"-webkit-resizer"|"-webkit-scrollbar-thumb"|"-webkit-scrollbar-button"|"-webkit-scrollbar-track"|"-webkit-scrollbar-track-piece"|"-webkit-scrollbar-corner";
+    /**
+     * Pseudo-style identifier (see <code>enum PseudoId</code> in <code>RenderStyleConstants.h</code>).
+     */
+    export type ForceablePseudoClass = "active"|"focus"|"focus-visible"|"focus-within"|"hover"|"target"|"visited";
     /**
      * CSS rule collection for a single pseudo style.
      */
@@ -710,6 +714,10 @@ export module Protocol {
        * Grouping list array (for rules involving @media/@supports). The array enumerates CSS groupings starting with the innermost one, going outwards.
        */
       groupings?: Grouping[];
+      /**
+       * <code>true</code> if this style is for a rule implicitly wrapping properties declared inside of CSSGrouping.
+       */
+      isImplicitlyNested?: boolean;
     }
     /**
      * Text range within a resource.
@@ -853,17 +861,25 @@ export module Protocol {
      */
     export interface Grouping {
       /**
-       * Source of the media query: "media-rule" if specified by a @media rule, "media-import-rule" if specified by an @import rule, "media-link-node" if specified by a "media" attribute in a linked style sheet's LINK tag, "media-style-node" if specified by a "media" attribute in an inline style sheet's STYLE tag, "supports-rule" if specified by an @supports rule, "layer-rule" if specified by an @layer rule.
+       * Source of the media query: "media-rule" if specified by a @media rule, "media-import-rule" if specified by an @import rule, "media-link-node" if specified by a "media" attribute in a linked style sheet's LINK tag, "media-style-node" if specified by a "media" attribute in an inline style sheet's STYLE tag, "supports-rule" if specified by an @supports rule, "layer-rule" if specified by an @layer rule, "container-rule" if specified by an @container rule, "style-rule" if specified by a CSSStyleRule containing the rule inside this grouping.
        */
-      type: "media-rule"|"media-import-rule"|"media-link-node"|"media-style-node"|"supports-rule"|"layer-rule"|"layer-import-rule";
+      type: "media-rule"|"media-import-rule"|"media-link-node"|"media-style-node"|"supports-rule"|"layer-rule"|"layer-import-rule"|"container-rule"|"style-rule";
       /**
-       * Query text if specified by a @media or @supports rule. Layer name (or not present for anonymous layers) for @layer rules.
+       * The CSS rule identifier for the `@rule` (absent for non-editable grouping rules) or the nesting parent style rule's selector. In CSSOM terms, this is the parent rule of either the previous Grouping for a CSSRule, or of a CSSRule itself.
+       */
+      ruleId?: CSSRuleId;
+      /**
+       * Query text if specified by a @media, @supports, or @container rule. Layer name (or not present for anonymous layers) for @layer rules.
        */
       text?: string;
       /**
        * URL of the document containing the CSS grouping.
        */
       sourceURL?: string;
+      /**
+       * @-rule's header text range in the enclosing stylesheet (if available). This is from the first non-whitespace character after the @ declarartion to the last non-whitespace character before an opening curly bracket or semicolon.
+       */
+      range?: SourceRange;
     }
     /**
      * A representation of WebCore::Font. Conceptually this is backed by either a font file on disk or from the network.
@@ -877,6 +893,14 @@ export module Protocol {
        * The variation axes defined by the font.
        */
       variationAxes: FontVariationAxis[];
+      /**
+       * Whether the font has synthesized its boldness or not.
+       */
+      synthesizedBold?: boolean;
+      /**
+       * Whether the font has synthesized its obliqueness or not
+       */
+      synthesizedOblique?: boolean;
     }
     /**
      * A single variation axis associated with a Font.
@@ -904,9 +928,9 @@ export module Protocol {
       defaultValue: number;
     }
     /**
-     * The layout context type of a node.
+     * Relevant layout information about the node. Things not in this list are not important to Web Inspector.
      */
-    export type LayoutContextType = "grid";
+    export type LayoutFlag = "rendered"|"scrollable"|"flex"|"grid"|"event";
     /**
      * The mode for how layout context type changes are handled (default: <code>Observed</code>). <code>Observed</code> limits handling to those nodes already known to the frontend by other means (generally, this means the node is a visible item in the Elements tab). <code>All</code> informs the frontend of all layout context type changes and all nodes with a known layout context are sent to the frontend.
      */
@@ -941,17 +965,17 @@ export module Protocol {
       styleSheetId: StyleSheetId;
     }
     /**
-     * Called when a node's layout context type has changed.
+     * Called when the layout of a node changes in a way that is important to Web Inspector.
      */
-    export type nodeLayoutContextTypeChangedPayload = {
+    export type nodeLayoutFlagsChangedPayload = {
       /**
-       * Identifier of the node whose layout context type changed.
+       * Identifier of the node whose layout changed.
        */
       nodeId: DOM.NodeId;
       /**
-       * The new layout context type of the node. When not provided, the <code>LayoutContextType</code> of the node is not a context for which Web Inspector has specific functionality.
+       * Relevant information about the layout of the node. When not provided, the layout of the node is not important to Web Inspector.
        */
-      layoutContextType?: LayoutContextType;
+      layoutFlags?: string[];
     }
     
     /**
@@ -1107,6 +1131,19 @@ export module Protocol {
       rule: CSSRule;
     }
     /**
+     * Modifies an @rule grouping's header text.
+     */
+    export type setGroupingHeaderTextParameters = {
+      ruleId: CSSRuleId;
+      headerText: string;
+    }
+    export type setGroupingHeaderTextReturnValue = {
+      /**
+       * The resulting grouping after the header text modification.
+       */
+      grouping: Grouping;
+    }
+    /**
      * Creates a new special "inspector" stylesheet in the frame with given <code>frameId</code>.
      */
     export type createStyleSheetParameters = {
@@ -1167,7 +1204,7 @@ export module Protocol {
       /**
        * Element pseudo classes to force when computing the element's style.
        */
-      forcedPseudoClasses: "active"|"focus"|"hover"|"visited"[];
+      forcedPseudoClasses: ForceablePseudoClass[];
     }
     export type forcePseudoStateReturnValue = {
     }
@@ -1200,7 +1237,7 @@ export module Protocol {
     /**
      * The type of rendering context backing the canvas element.
      */
-    export type ContextType = "canvas-2d"|"bitmaprenderer"|"webgl"|"webgl2";
+    export type ContextType = "canvas-2d"|"offscreen-canvas-2d"|"bitmaprenderer"|"offscreen-bitmaprenderer"|"webgl"|"offscreen-webgl"|"webgl2"|"offscreen-webgl2";
     export type ProgramType = "compute"|"render";
     export type ShaderType = "compute"|"fragment"|"vertex";
     /**
@@ -1219,6 +1256,10 @@ export module Protocol {
        * 2D
        */
       desynchronized?: boolean;
+      /**
+       * 2D
+       */
+      willReadFrequently?: boolean;
       /**
        * WebGL, WebGL2
        */
@@ -1261,6 +1302,14 @@ export module Protocol {
        */
       contextType: ContextType;
       /**
+       * Width of the canvas in pixels.
+       */
+      width: number;
+      /**
+       * Height of the canvas in pixels.
+       */
+      height: number;
+      /**
        * The corresponding DOM node id.
        */
       nodeId?: DOM.NodeId;
@@ -1279,7 +1328,7 @@ export module Protocol {
       /**
        * Backtrace that was captured when this canvas context was created.
        */
-      backtrace?: Console.CallFrame[];
+      stackTrace?: Console.StackTrace;
     }
     /**
      * Information about a WebGL/WebGL2 shader program.
@@ -1301,6 +1350,20 @@ export module Protocol {
        * Removed canvas identifier.
        */
       canvasId: CanvasId;
+    }
+    export type canvasSizeChangedPayload = {
+      /**
+       * Identifier of canvas that changed.
+       */
+      canvasId: CanvasId;
+      /**
+       * Width of the canvas in pixels.
+       */
+      width: number;
+      /**
+       * Height of the canvas in pixels.
+       */
+      height: number;
     }
     export type canvasMemoryChangedPayload = {
       /**
@@ -1508,6 +1571,10 @@ export module Protocol {
      */
     export type ChannelLevel = "off"|"basic"|"verbose";
     /**
+     * The reason the console is being cleared.
+     */
+    export type ClearReason = "console-api"|"frontend"|"main-frame-navigation";
+    /**
      * Logging channel.
      */
     export interface Channel {
@@ -1554,11 +1621,15 @@ export module Protocol {
       /**
        * JavaScript stack trace for assertions and error messages.
        */
-      stackTrace?: CallFrame[];
+      stackTrace?: StackTrace;
       /**
        * Identifier of the network request associated with this message.
        */
       networkRequestId?: Network.RequestId;
+      /**
+       * Time when this message was added. Currently only used when an expensive operation happens to make sure that the frontend can account for it.
+       */
+      timestamp?: number;
     }
     /**
      * Stack entry for console errors and assertions.
@@ -1621,11 +1692,20 @@ export module Protocol {
        * New repeat count value.
        */
       count: number;
+      /**
+       * Timestamp of the latest message.
+       */
+      timestamp?: number;
     }
     /**
      * Issued when console is cleared. This happens either upon <code>clearMessages</code> command or after page navigation.
      */
-    export type messagesClearedPayload = void;
+    export type messagesClearedPayload = {
+      /**
+       * The reason the console is being cleared.
+       */
+      reason: ClearReason;
+    }
     /**
      * Issued from console.takeHeapSnapshot.
      */
@@ -1661,6 +1741,14 @@ export module Protocol {
     export type clearMessagesParameters = {
     }
     export type clearMessagesReturnValue = {
+    }
+    /**
+     * Control whether calling <code>console.clear()</code> has an effect in Web Inspector. Defaults to true.
+     */
+    export type setConsoleClearAPIEnabledParameters = {
+      enable: boolean;
+    }
+    export type setConsoleClearAPIEnabledReturnValue = {
     }
     /**
      * List of the different message sources that are non-default logging channels.
@@ -1819,9 +1907,9 @@ export module Protocol {
        */
       contentSecurityPolicyHash?: string;
       /**
-       * The layout context type of the node. When not provided, the <code>LayoutContextType</code> of the node is not a context for which Web Inspector has specific functionality.
+       * Relevant information about the layout of the node. When not provided, the layout of the node is not important to Web Inspector.
        */
-      layoutContextType?: CSS.LayoutContextType;
+      layoutFlags?: string[];
     }
     /**
      * Relationship between data that is associated with a node and the node itself.
@@ -2034,6 +2122,10 @@ export module Protocol {
        * Array of <code>DOMNode</code> ids of any children marked as selected.
        */
       selectedChildNodeIds?: NodeId[];
+      /**
+       * On / off state of switch form controls.
+       */
+      switchState?: "off"|"on";
     }
     /**
      * A structure holding an RGBA color.
@@ -2084,6 +2176,172 @@ export module Protocol {
        * The margin highlight fill color (default: transparent).
        */
       marginColor?: RGBAColor;
+    }
+    /**
+     * Configuration data for grid overlays.
+     */
+    export interface GridOverlayConfig {
+      /**
+       * The primary color to use for the grid overlay.
+       */
+      gridColor: RGBAColor;
+      /**
+       * Show labels for grid line names. If not specified, the default value is false.
+       */
+      showLineNames?: boolean;
+      /**
+       * Show labels for grid line numbers. If not specified, the default value is false.
+       */
+      showLineNumbers?: boolean;
+      /**
+       * Show grid lines that extend beyond the bounds of the grid. If not specified, the default value is false.
+       */
+      showExtendedGridLines?: boolean;
+      /**
+       * Show grid track size information. If not specified, the default value is false.
+       */
+      showTrackSizes?: boolean;
+      /**
+       * Show labels for grid area names. If not specified, the default value is false.
+       */
+      showAreaNames?: boolean;
+    }
+    /**
+     * Configuration data for flex overlays.
+     */
+    export interface FlexOverlayConfig {
+      /**
+       * The primary color to use for the flex overlay.
+       */
+      flexColor: RGBAColor;
+      /**
+       * Show labels for flex order. If not specified, the default value is false.
+       */
+      showOrderNumbers?: boolean;
+    }
+    /**
+     * An object referencing a node and a pseudo-element, primarily used to identify an animation effect target.
+     */
+    export interface Styleable {
+      nodeId: NodeId;
+      pseudoId?: CSS.PseudoId;
+    }
+    /**
+     * A structure holding media element statistics and configurations.
+     */
+    export interface MediaStats {
+      audio?: AudioMediaStats;
+      video?: VideoMediaStats;
+      /**
+       * The ratio between physical screen pixels and CSS pixels.
+       */
+      devicePixelRatio?: number;
+      /**
+       * The viewport size occupied by the media element.
+       */
+      viewport?: ViewportSize;
+      quality?: VideoPlaybackQuality;
+      /**
+       * The source type of the media element.
+       */
+      source?: string;
+    }
+    /**
+     * A structure holding media element's audio-specific statistics and configurations.
+     */
+    export interface AudioMediaStats {
+      /**
+       * The data rate of the primary audio track in bits/s.
+       */
+      bitrate: number;
+      /**
+       * The codec string of the primary audio track. (E.g., "hvc1.1.6.L123.B0")
+       */
+      codec: string;
+      /**
+       * A human readable version of the `codec` parameter.
+       */
+      humanReadableCodecString: string;
+      /**
+       * The number of audio channels in the primary audio track.
+       */
+      numberOfChannels: number;
+      /**
+       * The sample rate of the primary audio track in hertz.
+       */
+      sampleRate: number;
+    }
+    /**
+     * A structure holding media element's audio-specific statistics and configurations.
+     */
+    export interface VideoMediaStats {
+      /**
+       * The data rate of the video track in bits/s.
+       */
+      bitrate: number;
+      /**
+       * The codec string of the video track. (E.g., "hvc1.1.6.L123.B0")
+       */
+      codec: string;
+      /**
+       * A human readable version of the `codec` parameter.
+       */
+      humanReadableCodecString: string;
+      colorSpace: VideoColorSpace;
+      /**
+       * The nominal frame rate of video track in frames per second.
+       */
+      framerate: number;
+      /**
+       * The native height of the video track in CSS pixels
+       */
+      height: number;
+      /**
+       * The native width of the video track in CSS pixels
+       */
+      width: number;
+    }
+    /**
+     * WebCodecs VideoColorSpace
+     */
+    export interface VideoColorSpace {
+      /**
+       * A flag indicating whether the colorspace is Full range (true) or Video range (false)
+       */
+      fullRange?: boolean;
+      /**
+       * The matrix specification of the colorspace
+       */
+      matrix?: string;
+      /**
+       * The color primaries specification of the colorspace
+       */
+      primaries?: string;
+      /**
+       * The transfer function specification of the colorspace
+       */
+      transfer?: string;
+    }
+    /**
+     * A count of frames enqueued for display by the media element, and a subset count of dropped and display composited frames.
+     */
+    export interface VideoPlaybackQuality {
+      /**
+       * The number of frames of the total which were composited by the display.
+       */
+      displayCompositedVideoFrames: number;
+      /**
+       * The number of frames of the total which were dropped without being displayed.
+       */
+      droppedVideoFrames: number;
+      /**
+       * The total number of frames enqueued for display by the media element.
+       */
+      totalVideoFrames: number;
+    }
+    export interface ViewportSize {
+      width: number;
+      height: number;
     }
     /**
      * Data to construct File object.
@@ -2377,7 +2635,7 @@ export module Protocol {
       /**
        * Query selector result.
        */
-      nodeId: NodeId;
+      nodeId?: NodeId;
     }
     /**
      * Executes <code>querySelectorAll</code> on a given node.
@@ -2542,6 +2800,10 @@ export module Protocol {
        * Id of the node to get listeners for.
        */
       nodeId: NodeId;
+      /**
+       * Controls whether ancestor event listeners are included. Defaults to true.
+       */
+      includeAncestors?: boolean;
     }
     export type getEventListenersForNodeReturnValue = {
       /**
@@ -2719,6 +2981,14 @@ export module Protocol {
        */
       highlightConfig?: HighlightConfig;
       /**
+       * If provided, used to configure a grid overlay shown during element selection. This overrides DOM.showGridOverlay.
+       */
+      gridOverlayConfig?: GridOverlayConfig;
+      /**
+       * If provided, used to configure a flex overlay shown during element selection. This overrides DOM.showFlexOverlay.
+       */
+      flexOverlayConfig?: FlexOverlayConfig;
+      /**
        * Whether the rulers should be shown during element selection. This overrides Page.setShowRulers.
        */
       showRulers?: boolean;
@@ -2788,10 +3058,6 @@ export module Protocol {
      */
     export type highlightSelectorParameters = {
       /**
-       * A descriptor for the highlight appearance.
-       */
-      highlightConfig: HighlightConfig;
-      /**
        * A CSS selector for finding matching nodes to highlight.
        */
       selectorString: string;
@@ -2799,6 +3065,22 @@ export module Protocol {
        * Identifier of the frame which will be searched using the selector.  If not provided, the main frame will be used.
        */
       frameId?: string;
+      /**
+       * A descriptor for the highlight appearance.
+       */
+      highlightConfig: HighlightConfig;
+      /**
+       * If provided, used to configure a grid overlay shown during element selection. This overrides DOM.showGridOverlay.
+       */
+      gridOverlayConfig?: GridOverlayConfig;
+      /**
+       * If provided, used to configure a flex overlay shown during element selection. This overrides DOM.showFlexOverlay.
+       */
+      flexOverlayConfig?: FlexOverlayConfig;
+      /**
+       * Whether the rulers should be shown during element selection. This overrides Page.setShowRulers.
+       */
+      showRulers?: boolean;
     }
     export type highlightSelectorReturnValue = {
     }
@@ -2807,10 +3089,6 @@ export module Protocol {
      */
     export type highlightNodeParameters = {
       /**
-       * A descriptor for the highlight appearance.
-       */
-      highlightConfig: HighlightConfig;
-      /**
        * Identifier of the node to highlight.
        */
       nodeId?: NodeId;
@@ -2818,6 +3096,22 @@ export module Protocol {
        * JavaScript object id of the node to be highlighted.
        */
       objectId?: Runtime.RemoteObjectId;
+      /**
+       * A descriptor for the highlight appearance.
+       */
+      highlightConfig: HighlightConfig;
+      /**
+       * If provided, used to configure a grid overlay shown during element selection. This overrides DOM.showGridOverlay.
+       */
+      gridOverlayConfig?: GridOverlayConfig;
+      /**
+       * If provided, used to configure a flex overlay shown during element selection. This overrides DOM.showFlexOverlay.
+       */
+      flexOverlayConfig?: FlexOverlayConfig;
+      /**
+       * Whether the rulers should be shown during element selection. This overrides Page.setShowRulers.
+       */
+      showRulers?: boolean;
     }
     export type highlightNodeReturnValue = {
     }
@@ -2827,6 +3121,18 @@ export module Protocol {
     export type highlightNodeListParameters = {
       nodeIds: NodeId[];
       highlightConfig: HighlightConfig;
+      /**
+       * If provided, used to configure a grid overlay shown during element selection. This overrides DOM.showGridOverlay.
+       */
+      gridOverlayConfig?: GridOverlayConfig;
+      /**
+       * If provided, used to configure a flex overlay shown during element selection. This overrides DOM.showFlexOverlay.
+       */
+      flexOverlayConfig?: FlexOverlayConfig;
+      /**
+       * Whether the rulers should be shown during element selection. This overrides Page.setShowRulers.
+       */
+      showRulers?: boolean;
     }
     export type highlightNodeListReturnValue = {
     }
@@ -2865,29 +3171,9 @@ export module Protocol {
        */
       nodeId: NodeId;
       /**
-       * The primary color to use for the grid overlay.
+       * Configuration options for the grid overlay.
        */
-      gridColor: RGBAColor;
-      /**
-       * Show labels for grid line names. If not specified, the default value is false.
-       */
-      showLineNames?: boolean;
-      /**
-       * Show labels for grid line numbers. If not specified, the default value is false.
-       */
-      showLineNumbers?: boolean;
-      /**
-       * Show grid lines that extend beyond the bounds of the grid. If not specified, the default value is false.
-       */
-      showExtendedGridLines?: boolean;
-      /**
-       * Show grid track size information. If not specified, the default value is false.
-       */
-      showTrackSizes?: boolean;
-      /**
-       * Show labels for grid area names. If not specified, the default value is false.
-       */
-      showAreaNames?: boolean;
+      gridOverlayConfig: GridOverlayConfig;
     }
     export type showGridOverlayReturnValue = {
     }
@@ -2901,6 +3187,32 @@ export module Protocol {
       nodeId?: NodeId;
     }
     export type hideGridOverlayReturnValue = {
+    }
+    /**
+     * Shows a flex overlay for a node that begins a 'flex' layout context. The command has no effect if <code>nodeId</code> is invalid or the associated node does not begin a 'flex' layout context. A node can only have one flex overlay at a time; subsequent calls with the same <code>nodeId</code> will override earlier calls.
+     */
+    export type showFlexOverlayParameters = {
+      /**
+       * The node for which a flex overlay should be shown.
+       */
+      nodeId: NodeId;
+      /**
+       * Configuration options for the flex overlay.
+       */
+      flexOverlayConfig: FlexOverlayConfig;
+    }
+    export type showFlexOverlayReturnValue = {
+    }
+    /**
+     * Hides a flex overlay for a node that begins a 'flex' layout context. The command has no effect if <code>nodeId</code> is specified and invalid, or if there is not currently an overlay set for the <code>nodeId</code>.
+     */
+    export type hideFlexOverlayParameters = {
+      /**
+       * The node for which a flex overlay should be hidden. If a <code>nodeId</code> is not specified, all flex overlays will be hidden.
+       */
+      nodeId?: NodeId;
+    }
+    export type hideFlexOverlayReturnValue = {
     }
     /**
      * Requests that the node is sent to the caller given its path.
@@ -2929,6 +3241,10 @@ export module Protocol {
        * Source element handle.
        */
       objectId?: Runtime.RemoteObjectId;
+      /**
+       * Id of the frame to resolve the owner element.
+       */
+      frameId?: Network.FrameId;
       /**
        * Specifies in which execution context to adopt to.
        */
@@ -3034,6 +3350,21 @@ export module Protocol {
     export type setAllowEditingUserAgentShadowTreesReturnValue = {
     }
     /**
+     * Returns media stats for the selected node.
+     */
+    export type getMediaStatsParameters = {
+      /**
+       * Id of the node to retrieve mediastats for.
+       */
+      nodeId: NodeId;
+    }
+    export type getMediaStatsReturnValue = {
+      /**
+       * An interleaved array of node attribute names and values.
+       */
+      mediaStats: MediaStats;
+    }
+    /**
      * Returns node description.
      */
     export type describeNodeParameters = {
@@ -3094,7 +3425,11 @@ might return multiple quads for inline nodes.
       /**
        * Files to set
        */
-      files: FilePayload[];
+      files?: FilePayload[];
+      /**
+       * File paths to set
+       */
+      paths?: string[];
     }
     export type setInputFilesReturnValue = {
     }
@@ -3158,6 +3493,14 @@ might return multiple quads for inline nodes.
        */
       eventName?: string;
       /**
+       * If true, eventName is case sensitive. Defaults to true.
+       */
+      caseSensitive?: boolean;
+      /**
+       * If true, treats eventName as a regex. Defaults to false.
+       */
+      isRegex?: boolean;
+      /**
        * Options to apply to this breakpoint to modify its behavior.
        */
       options?: Debugger.BreakpointOptions;
@@ -3173,6 +3516,14 @@ might return multiple quads for inline nodes.
        * The name of the specific event to stop on.
        */
       eventName?: string;
+      /**
+       * If true, eventName is case sensitive. Defaults to true.
+       */
+      caseSensitive?: boolean;
+      /**
+       * If true, treats eventName as a regex. Defaults to false.
+       */
+      isRegex?: boolean;
     }
     export type removeEventBreakpointReturnValue = {
     }
@@ -3673,7 +4024,7 @@ might return multiple quads for inline nodes.
       /**
        * Pause reason.
        */
-      reason: "XHR"|"Fetch"|"DOM"|"AnimationFrame"|"Interval"|"Listener"|"Timeout"|"exception"|"assert"|"CSPViolation"|"DebuggerStatement"|"Breakpoint"|"PauseOnNextStatement"|"Microtask"|"BlackboxedScript"|"other";
+      reason: "URL"|"DOM"|"AnimationFrame"|"Interval"|"Listener"|"Timeout"|"exception"|"assert"|"CSPViolation"|"DebuggerStatement"|"Breakpoint"|"PauseOnNextStatement"|"Microtask"|"FunctionCall"|"BlackboxedScript"|"other";
       /**
        * Object containing break-specific auxiliary properties.
        */
@@ -3809,6 +4160,48 @@ might return multiple quads for inline nodes.
     export type removeBreakpointReturnValue = {
     }
     /**
+     * Adds a JavaScript breakpoint that pauses execution whenever a function with the given name is about to be called.
+     */
+    export type addSymbolicBreakpointParameters = {
+      /**
+       * The name of the function to pause in when called.
+       */
+      symbol: string;
+      /**
+       * If true, symbol is case sensitive. Defaults to true.
+       */
+      caseSensitive?: boolean;
+      /**
+       * If true, treats symbol as a regex. Defaults to false.
+       */
+      isRegex?: boolean;
+      /**
+       * Options to apply to this breakpoint to modify its behavior.
+       */
+      options?: BreakpointOptions;
+    }
+    export type addSymbolicBreakpointReturnValue = {
+    }
+    /**
+     * Removes a previously added symbolic breakpoint.
+     */
+    export type removeSymbolicBreakpointParameters = {
+      /**
+       * The name of the function to pause in when called.
+       */
+      symbol: string;
+      /**
+       * If true, symbol is case sensitive. Defaults to true.
+       */
+      caseSensitive?: boolean;
+      /**
+       * If true, treats symbol as a regex. Defaults to false.
+       */
+      isRegex?: boolean;
+    }
+    export type removeSymbolicBreakpointReturnValue = {
+    }
+    /**
      * Continues execution until the current evaluation completes. This will trigger either a Debugger.paused or Debugger.resumed event.
      */
     export type continueUntilNextRunLoopParameters = {
@@ -3926,6 +4319,25 @@ might return multiple quads for inline nodes.
       details: FunctionDetails;
     }
     /**
+     * Returns a list of valid breakpoint locations within the given location range.
+     */
+    export type getBreakpointLocationsParameters = {
+      /**
+       * Starting location to look for breakpoint locations after (inclusive). Must have same scriptId as end.
+       */
+      start: Location;
+      /**
+       * Ending location to look for breakpoint locations before (exclusive). Must have same scriptId as start.
+       */
+      end: Location;
+    }
+    export type getBreakpointLocationsReturnValue = {
+      /**
+       * List of resolved breakpoint locations.
+       */
+      locations: Location[];
+    }
+    /**
      * Control whether the debugger pauses execution before `debugger` statements.
      */
     export type setPauseOnDebuggerStatementsParameters = {
@@ -4040,21 +4452,33 @@ might return multiple quads for inline nodes.
       savedResultIndex?: number;
     }
     /**
-     * Sets whether the given URL should be in the list of blackboxed scripts, which are ignored when pausing/stepping/debugging.
+     * Sets whether the given URL should be in the list of blackboxed scripts, which are ignored when pausing.
      */
     export type setShouldBlackboxURLParameters = {
       url: string;
       shouldBlackbox: boolean;
       /**
-       * If true, <code>url</code> is case sensitive.
+       * If <code>true</code>, <code>url</code> is case sensitive.
        */
       caseSensitive?: boolean;
       /**
-       * If true, treat <code>url</code> as regular expression.
+       * If <code>true</code>, treat <code>url</code> as regular expression.
        */
       isRegex?: boolean;
+      /**
+       * If provided, limits where in the script the debugger will skip pauses. Expected structure is a repeated <code>[startLine, startColumn, endLine, endColumn]</code>. Ignored if <code>shouldBlackbox</code> is <code>false</code>.
+       */
+      sourceRanges?: number[];
     }
     export type setShouldBlackboxURLReturnValue = {
+    }
+    /**
+     * Sets whether evaluation of breakpoint conditions, ignore counts, and actions happen at the location of the breakpoint or are deferred due to blackboxing.
+     */
+    export type setBlackboxBreakpointEvaluationsParameters = {
+      blackboxBreakpointEvaluations: boolean;
+    }
+    export type setBlackboxBreakpointEvaluationsReturnValue = {
     }
   }
   
@@ -4140,6 +4564,7 @@ might return multiple quads for inline nodes.
     export type setAuthCredentialsParameters = {
       username?: string;
       password?: string;
+      origin?: string;
     }
     export type setAuthCredentialsReturnValue = {
     }
@@ -4166,6 +4591,14 @@ might return multiple quads for inline nodes.
     export type resetPermissionsParameters = {
     }
     export type resetPermissionsReturnValue = {
+    }
+    /**
+     * Overrides window.orientation with provided value.
+     */
+    export type setOrientationOverrideParameters = {
+      angle?: number;
+    }
+    export type setOrientationOverrideReturnValue = {
     }
   }
   
@@ -4584,6 +5017,23 @@ might return multiple quads for inline nodes.
      * UTC time in seconds, counted from January 1, 1970.
      */
     export type TimeSinceEpoch = number;
+    /**
+     * Touch point.
+     */
+    export interface TouchPoint {
+      /**
+       * X coordinate of the event relative to the main frame's viewport in CSS pixels.
+       */
+      x: number;
+      /**
+       * Y coordinate of the event relative to the main frame's viewport in CSS pixels.
+       */
+      y: number;
+      /**
+       * Identifier used to track touch sources between events, must be unique within an event.
+       */
+      id: number;
+    }
     
     
     /**
@@ -4739,6 +5189,26 @@ the top of the viewport and Y increases as it proceeds towards the bottom of the
       modifiers?: number;
     }
     export type dispatchTapEventReturnValue = {
+    }
+    /**
+     * Dispatches a touch event to the page.
+     */
+    export type dispatchTouchEventParameters = {
+      /**
+       * Type of the touch event.
+       */
+      type: "touchStart"|"touchMove"|"touchEnd"|"touchCancel";
+      /**
+       * Bit field representing pressed modifier keys. Alt=1, Ctrl=2, Meta/Command=4, Shift=8
+(default: 0).
+       */
+      modifiers?: number;
+      /**
+       * List of touch points
+       */
+      touchPoints?: TouchPoint[];
+    }
+    export type dispatchTouchEventReturnValue = {
     }
   }
   
@@ -4974,6 +5444,10 @@ the top of the viewport and Y increases as it proceeds towards the bottom of the
        * Composition due to association with an element with a "blend-mode" style.
        */
       blending?: boolean;
+      /**
+       * Composition due to association with an element that is a backdrop root
+       */
+      backdropRoot?: boolean;
     }
     
     export type layerTreeDidChangePayload = void;
@@ -5130,6 +5604,10 @@ the top of the viewport and Y increases as it proceeds towards the bottom of the
      */
     export type Walltime = number;
     /**
+     * Controls how much referrer information is sent with the request
+     */
+    export type ReferrerPolicy = "empty-string"|"no-referrer"|"no-referrer-when-downgrade"|"same-origin"|"origin"|"strict-origin"|"origin-when-cross-origin"|"strict-origin-when-cross-origin"|"unsafe-url";
+    /**
      * Request / response headers as keys / values of JSON object.
      */
     export type Headers = { [key: string]: string };
@@ -5206,6 +5684,14 @@ the top of the viewport and Y increases as it proceeds towards the bottom of the
        * HTTP POST request data.
        */
       postData?: string;
+      /**
+       * The level of included referrer information.
+       */
+      referrerPolicy?: ReferrerPolicy;
+      /**
+       * The base64 cryptographic hash of the resource.
+       */
+      integrity?: string;
     }
     /**
      * HTTP response data.
@@ -5296,6 +5782,10 @@ the top of the viewport and Y increases as it proceeds towards the bottom of the
        * Connection information for the completed request.
        */
       securityConnection?: Security.Connection;
+      /**
+       * Whether or not the connection was proxied through a server. If <code>true</code>, the <code>remoteAddress</code> will be for the proxy server, not the server that provided the resource to the proxy server.
+       */
+      isProxyConnection?: boolean;
     }
     /**
      * WebSocket request data.
@@ -5380,7 +5870,7 @@ the top of the viewport and Y increases as it proceeds towards the bottom of the
       /**
        * Initiator JavaScript stack trace, set for Script only.
        */
-      stackTrace?: Console.CallFrame[];
+      stackTrace?: Console.StackTrace;
       /**
        * Initiator URL, set for Parser type only.
        */
@@ -5990,6 +6480,17 @@ the top of the viewport and Y increases as it proceeds towards the bottom of the
     export type interceptRequestWithErrorReturnValue = {
     }
     /**
+     * Emulate various network conditions (e.g. bytes per second, latency, etc.).
+     */
+    export type setEmulatedConditionsParameters = {
+      /**
+       * Limits the bytes per second of requests if positive. Removes any limits if zero or not provided.
+       */
+      bytesPerSecondLimit?: number;
+    }
+    export type setEmulatedConditionsReturnValue = {
+    }
+    /**
      * Emulate offline state overriding the actual state.
      */
     export type setEmulateOfflineStateParameters = {
@@ -6009,7 +6510,28 @@ the top of the viewport and Y increases as it proceeds towards the bottom of the
     /**
      * List of settings able to be overridden by WebInspector.
      */
-    export type Setting = "PrivateClickMeasurementDebugModeEnabled"|"AuthorAndUserStylesEnabled"|"ICECandidateFilteringEnabled"|"ITPDebugModeEnabled"|"ImagesEnabled"|"MediaCaptureRequiresSecureConnection"|"MockCaptureDevicesEnabled"|"NeedsSiteSpecificQuirks"|"ScriptEnabled"|"ShowDebugBorders"|"ShowRepaintCounter"|"WebRTCEncryptionEnabled"|"WebSecurityEnabled"|"DeviceOrientationEventEnabled"|"SpeechRecognitionEnabled"|"PointerLockEnabled"|"NotificationsEnabled"|"FullScreenEnabled"|"InputTypeMonthEnabled"|"InputTypeWeekEnabled";
+    export type Setting = "PrivateClickMeasurementDebugModeEnabled"|"AuthorAndUserStylesEnabled"|"ICECandidateFilteringEnabled"|"ITPDebugModeEnabled"|"ImagesEnabled"|"MediaCaptureRequiresSecureConnection"|"MockCaptureDevicesEnabled"|"NeedsSiteSpecificQuirks"|"ScriptEnabled"|"ShowDebugBorders"|"ShowRepaintCounter"|"WebSecurityEnabled"|"DeviceOrientationEventEnabled"|"SpeechRecognitionEnabled"|"PointerLockEnabled"|"NotificationsEnabled"|"FullScreenEnabled"|"InputTypeMonthEnabled"|"InputTypeWeekEnabled";
+    /**
+     * A user preference that can be overriden by Web Inspector, like an accessibility preference.
+     */
+    export interface UserPreference {
+      /**
+       * Preference name.
+       */
+      name: UserPreferenceName;
+      /**
+       * Preference value.
+       */
+      value: UserPreferenceValue;
+    }
+    /**
+     * User preference name.
+     */
+    export type UserPreferenceName = "PrefersReducedMotion"|"PrefersContrast"|"PrefersColorScheme";
+    /**
+     * User preference value.
+     */
+    export type UserPreferenceValue = "NoPreference"|"Reduce"|"More"|"Light"|"Dark";
     /**
      * Resource type as it was perceived by the rendering engine.
      */
@@ -6023,13 +6545,9 @@ the top of the viewport and Y increases as it proceeds towards the bottom of the
      */
     export type CookieSameSitePolicy = "None"|"Lax"|"Strict";
     /**
-     * Page appearance name.
+     * Page forced-colors media query override.
      */
-    export type Appearance = "Light"|"Dark";
-    /**
-     * Page reduced-motion media query override.
-     */
-    export type ReducedMotion = "Reduce"|"NoPreference";
+    export type ForcedColors = "Active"|"None";
     /**
      * Information about the Frame on the page.
      */
@@ -6221,10 +6739,6 @@ the top of the viewport and Y increases as it proceeds towards the bottom of the
        */
       modal?: boolean;
       /**
-       * Whether the node text input supports multiline.
-       */
-      multiline?: boolean;
-      /**
        * Whether more than one child can be selected.
        */
       multiselectable?: boolean;
@@ -6371,6 +6885,10 @@ the top of the viewport and Y increases as it proceeds towards the bottom of the
        * Delay (in seconds) until the navigation is scheduled to begin. The navigation is not guaranteed to start.
        */
       delay: number;
+      /**
+       * Whether the naviation will happen in the same frame.
+       */
+      targetIsCurrentFrame: boolean;
     }
     /**
      * Fired when frame no longer has a scheduled navigation.
@@ -6395,25 +6913,35 @@ the top of the viewport and Y increases as it proceeds towards the bottom of the
       url: string;
     }
     /**
-     * Fired when page's default appearance changes, even if there is a forced appearance.
+     * Fired when the default value of a user preference changes at the system level.
      */
-    export type defaultAppearanceDidChangePayload = {
+    export type defaultUserPreferencesDidChangePayload = {
       /**
-       * Name of the appearance that is active (not considering any forced appearance.)
+       * List of user preferences that can be overriden and their new system (default) values.
        */
-      appearance: Appearance;
+      preferences: UserPreference[];
     }
     /**
-     * Fired when page tries to open a new window.
+     * Fired when page is about to check policy for newly triggered navigation.
      */
-    export type willRequestOpenWindowPayload = {
-      url: string;
+    export type willCheckNavigationPolicyPayload = {
+      /**
+       * Id of the frame.
+       */
+      frameId: Network.FrameId;
     }
     /**
-     * Fired after page did try to open a new window.
+     * Fired when page has received navigation policy decision.
      */
-    export type didRequestOpenWindowPayload = {
-      opened: boolean;
+    export type didCheckNavigationPolicyPayload = {
+      /**
+       * Id of the frame.
+       */
+      frameId: Network.FrameId;
+      /**
+       * True if the navigation will not continue in this frame.
+       */
+      cancel?: boolean;
     }
     /**
      * Fired when the page shows file chooser for it's <input type=file>.
@@ -6518,6 +7046,18 @@ the top of the viewport and Y increases as it proceeds towards the bottom of the
     export type overrideSettingReturnValue = {
     }
     /**
+     * Allows the frontend to override the user's preferences on the inspected page.
+     */
+    export type overrideUserPreferenceParameters = {
+      name: UserPreferenceName;
+      /**
+       * Value to override the user preference with. If this value is not provided, the override is removed. Overrides are removed when Web Inspector closes/disconnects.
+       */
+      value?: UserPreferenceValue;
+    }
+    export type overrideUserPreferenceReturnValue = {
+    }
+    /**
      * Returns all browser cookies. Depending on the backend support, will return detailed cookie information in the <code>cookies</code> field.
      */
     export type getCookiesParameters = {
@@ -6590,10 +7130,6 @@ the top of the viewport and Y increases as it proceeds towards the bottom of the
        * If `source` is provided (and not empty), it will be injected into all future global objects as soon as they're created. Omitting `source` will stop this from happening.
        */
       source?: string;
-      /**
-       * Isolated world name to evaluate the script in. If not specified main world will be used.
-       */
-      worldName?: string;
     }
     export type setBootstrapScriptReturnValue = {
     }
@@ -6689,20 +7225,12 @@ the top of the viewport and Y increases as it proceeds towards the bottom of the
     export type setEmulatedMediaReturnValue = {
     }
     /**
-     * Forces the given appearance for the page.
+     * Forces the forced-colors media query for the page.
      */
-    export type setForcedAppearanceParameters = {
-      appearance?: Appearance;
+    export type setForcedColorsParameters = {
+      forcedColors?: ForcedColors;
     }
-    export type setForcedAppearanceReturnValue = {
-    }
-    /**
-     * Forces the reduced-motion media query for the page.
-     */
-    export type setForcedReducedMotionParameters = {
-      reducedMotion?: ReducedMotion;
-    }
-    export type setForcedReducedMotionReturnValue = {
+    export type setForcedColorsReturnValue = {
     }
     /**
      * Enables time zone emulation.
@@ -6811,18 +7339,6 @@ the top of the viewport and Y increases as it proceeds towards the bottom of the
     export type insertTextReturnValue = {
     }
     /**
-     * Set the current IME composition.
-     */
-    export type setCompositionParameters = {
-      text: string;
-      selectionStart: number;
-      selectionLength: number;
-      replacementStart?: number;
-      replacementLength?: number;
-    }
-    export type setCompositionReturnValue = {
-    }
-    /**
      * Serializes and returns all of the accessibility nodes of the page.
      */
     export type accessibilitySnapshotParameters = {
@@ -6887,22 +7403,6 @@ the top of the viewport and Y increases as it proceeds towards the bottom of the
     export type crashParameters = {
     }
     export type crashReturnValue = {
-    }
-    /**
-     * Overrides window.orientation with provided value.
-     */
-    export type setOrientationOverrideParameters = {
-      angle?: number;
-    }
-    export type setOrientationOverrideReturnValue = {
-    }
-    export type setVisibleContentRectsParameters = {
-      unobscuredContentRect?: DOM.Rect;
-      contentInsets?: Insets;
-      obscuredInsets?: Insets;
-      unobscuredInsets?: Insets;
-    }
-    export type setVisibleContentRectsReturnValue = {
     }
     /**
      * Ensures that the scroll regions are up to date.
@@ -7127,6 +7627,14 @@ the top of the viewport and Y increases as it proceeds towards the bottom of the
     }
     export type disableReturnValue = {
     }
+    export type getInfoParameters = {
+    }
+    export type getInfoReturnValue = {
+      /**
+       * Name of the operating system where the browser is running (macOS, Linux or Windows).
+       */
+      os: string;
+    }
     /**
      * Close browser.
      */
@@ -7202,6 +7710,56 @@ the top of the viewport and Y increases as it proceeds towards the bottom of the
        * Identifier of the loader associated with the navigation.
        */
       loaderId?: Network.LoaderId;
+    }
+    /**
+     * Grants read access for the specified files to the web process of the page.
+     */
+    export type grantFileReadAccessParameters = {
+      /**
+       * Unique identifier of the page proxy.
+       */
+      pageProxyId: PageProxyID;
+      /**
+       * Id of the frame to navigate.
+       */
+      paths: string[];
+    }
+    export type grantFileReadAccessReturnValue = {
+    }
+    /**
+     * Capture a snapshot of the page.
+     */
+    export type takePageScreenshotParameters = {
+      /**
+       * Unique identifier of the page proxy.
+       */
+      pageProxyId: PageProxyID;
+      /**
+       * X coordinate
+       */
+      x: number;
+      /**
+       * Y coordinate
+       */
+      y: number;
+      /**
+       * Rectangle width
+       */
+      width: number;
+      /**
+       * Rectangle height
+       */
+      height: number;
+      /**
+       * By default, screenshot is inflated by device scale factor to avoid blurry image. This flag disables it.
+       */
+      omitDeviceScaleFactor?: boolean;
+    }
+    export type takePageScreenshotReturnValue = {
+      /**
+       * Base64-encoded image data (PNG).
+       */
+      dataURL: string;
     }
     /**
      * Change whether all certificate errors should be ignored.
@@ -7304,6 +7862,17 @@ the top of the viewport and Y increases as it proceeds towards the bottom of the
     }
     export type cancelDownloadReturnValue = {
     }
+    /**
+     * Clears browser memory cache.
+     */
+    export type clearMemoryCacheParameters = {
+      /**
+       * Browser context id.
+       */
+      browserContextId: ContextID;
+    }
+    export type clearMemoryCacheReturnValue = {
+    }
   }
   
   /**
@@ -7313,7 +7882,7 @@ the top of the viewport and Y increases as it proceeds towards the bottom of the
     /**
      * The type of the recording.
      */
-    export type Type = "canvas-2d"|"canvas-bitmaprenderer"|"canvas-webgl"|"canvas-webgl2";
+    export type Type = "canvas-2d"|"offscreen-canvas-2d"|"canvas-bitmaprenderer"|"offscreen-canvas-bitmaprenderer"|"canvas-webgl"|"offscreen-canvas-webgl"|"canvas-webgl2"|"offscreen-canvas-webgl2";
     export type Initiator = "frontend"|"console"|"auto-capture";
     /**
      * Information about the initial state of the recorded object.
@@ -7341,7 +7910,7 @@ the top of the viewport and Y increases as it proceeds towards the bottom of the
      */
     export interface Frame {
       /**
-       * Information about an action made to the recorded object. Follows the structure [name, parameters, swizzleTypes, trace, snapshot], where name is a string, parameters is an array, swizzleTypes is an array, trace is an array, and snapshot is a data URL image of the current contents after this action.
+       * Information about an action made to the recorded object. Follows the structure [name, parameters, swizzleTypes, stackTrace, snapshot], where name is a string, parameters is an array, swizzleTypes is an array, stackTrace is a Console.StackTrace, and snapshot is a data URL image of the current contents after this action.
        */
       actions: any[];
       /**
@@ -7392,7 +7961,7 @@ the top of the viewport and Y increases as it proceeds towards the bottom of the
       /**
        * Object subtype hint. Specified for <code>object</code> <code>function</code> (for class) type values only.
        */
-      subtype?: "array"|"null"|"node"|"regexp"|"date"|"error"|"map"|"set"|"weakmap"|"weakset"|"iterator"|"class"|"proxy";
+      subtype?: "array"|"null"|"node"|"regexp"|"date"|"error"|"map"|"set"|"weakmap"|"weakset"|"iterator"|"class"|"proxy"|"weakref";
       /**
        * Object class (constructor) name. Specified for <code>object</code> type values only.
        */
@@ -7433,7 +8002,7 @@ the top of the viewport and Y increases as it proceeds towards the bottom of the
       /**
        * Object subtype hint. Specified for <code>object</code> type values only.
        */
-      subtype?: "array"|"null"|"node"|"regexp"|"date"|"error"|"map"|"set"|"weakmap"|"weakset"|"iterator"|"class"|"proxy";
+      subtype?: "array"|"null"|"node"|"regexp"|"date"|"error"|"map"|"set"|"weakmap"|"weakset"|"iterator"|"class"|"proxy"|"weakref";
       /**
        * String representation of the object.
        */
@@ -7471,7 +8040,7 @@ the top of the viewport and Y increases as it proceeds towards the bottom of the
       /**
        * Object subtype hint. Specified for <code>object</code> type values only.
        */
-      subtype?: "array"|"null"|"node"|"regexp"|"date"|"error"|"map"|"set"|"weakmap"|"weakset"|"iterator"|"class"|"proxy";
+      subtype?: "array"|"null"|"node"|"regexp"|"date"|"error"|"map"|"set"|"weakmap"|"weakset"|"iterator"|"class"|"proxy"|"weakref";
       /**
        * User-friendly property value string.
        */
@@ -7480,6 +8049,10 @@ the top of the viewport and Y increases as it proceeds towards the bottom of the
        * Nested value preview.
        */
       valuePreview?: ObjectPreview;
+      /**
+       * True if this is a private field.
+       */
+      isPrivate?: boolean;
       /**
        * True if this is an internal property.
        */
@@ -7549,6 +8122,10 @@ the top of the viewport and Y increases as it proceeds towards the bottom of the
        * Property symbol object, if the property is a symbol.
        */
       symbol?: Runtime.RemoteObject;
+      /**
+       * True if the property is a private field.
+       */
+      isPrivate?: boolean;
       /**
        * True if the property value came from a native getter.
        */
@@ -7760,6 +8337,23 @@ the top of the viewport and Y increases as it proceeds towards the bottom of the
        */
       context: ExecutionContextDescription;
     }
+    /**
+     * Issued when new execution context is created.
+     */
+    export type bindingCalledPayload = {
+      /**
+       * Id of the execution context where the binding was called.
+       */
+      contextId: ExecutionContextId;
+      /**
+       * Name of the bound function.
+       */
+      name: string;
+      /**
+       * String argument passed to the function.
+       */
+      argument: string;
+    }
     
     /**
      * Parses JavaScript source code for errors.
@@ -7920,6 +8514,17 @@ the top of the viewport and Y increases as it proceeds towards the bottom of the
        * True if the result was thrown during the evaluation.
        */
       wasThrown?: boolean;
+    }
+    /**
+     * Adds binding with the given name on the global objects of all inspected contexts. Each binding function call produces Runtime.bindingCalled event.
+     */
+    export type addBindingParameters = {
+      /**
+       * Name of the bound function.
+       */
+      name: string;
+    }
+    export type addBindingReturnValue = {
     }
     /**
      * Returns a preview for the given object.
@@ -8486,11 +9091,11 @@ the top of the viewport and Y increases as it proceeds towards the bottom of the
     /**
      * Timeline record type.
      */
-    export type EventType = "EventDispatch"|"ScheduleStyleRecalculation"|"RecalculateStyles"|"InvalidateLayout"|"Layout"|"Paint"|"Composite"|"RenderingFrame"|"TimerInstall"|"TimerRemove"|"TimerFire"|"EvaluateScript"|"TimeStamp"|"Time"|"TimeEnd"|"FunctionCall"|"ProbeSample"|"ConsoleProfile"|"RequestAnimationFrame"|"CancelAnimationFrame"|"FireAnimationFrame"|"ObserverCallback";
+    export type EventType = "EventDispatch"|"ScheduleStyleRecalculation"|"RecalculateStyles"|"InvalidateLayout"|"Layout"|"Paint"|"Composite"|"RenderingFrame"|"TimerInstall"|"TimerRemove"|"TimerFire"|"EvaluateScript"|"TimeStamp"|"Time"|"TimeEnd"|"FunctionCall"|"ProbeSample"|"ConsoleProfile"|"RequestAnimationFrame"|"CancelAnimationFrame"|"FireAnimationFrame"|"ObserverCallback"|"Screenshot";
     /**
      * Instrument types.
      */
-    export type Instrument = "ScriptProfiler"|"Timeline"|"CPU"|"Memory"|"Heap"|"Animation";
+    export type Instrument = "ScriptProfiler"|"Timeline"|"CPU"|"Memory"|"Heap"|"Animation"|"Screenshot";
     /**
      * Timeline record contains information about the recorded activity.
      */
@@ -8603,10 +9208,6 @@ the top of the viewport and Y increases as it proceeds towards the bottom of the
       workerId: string;
       url: string;
       name: string;
-      /**
-       * Id of the frame this worker belongs to.
-       */
-      frameId: Network.FrameId;
     }
     export type workerTerminatedPayload = {
       workerId: string;
@@ -8675,9 +9276,10 @@ the top of the viewport and Y increases as it proceeds towards the bottom of the
     "CSS.styleSheetChanged": CSS.styleSheetChangedPayload;
     "CSS.styleSheetAdded": CSS.styleSheetAddedPayload;
     "CSS.styleSheetRemoved": CSS.styleSheetRemovedPayload;
-    "CSS.nodeLayoutContextTypeChanged": CSS.nodeLayoutContextTypeChangedPayload;
+    "CSS.nodeLayoutFlagsChanged": CSS.nodeLayoutFlagsChangedPayload;
     "Canvas.canvasAdded": Canvas.canvasAddedPayload;
     "Canvas.canvasRemoved": Canvas.canvasRemovedPayload;
+    "Canvas.canvasSizeChanged": Canvas.canvasSizeChangedPayload;
     "Canvas.canvasMemoryChanged": Canvas.canvasMemoryChangedPayload;
     "Canvas.extensionEnabled": Canvas.extensionEnabledPayload;
     "Canvas.clientNodesChanged": Canvas.clientNodesChangedPayload;
@@ -8759,9 +9361,9 @@ the top of the viewport and Y increases as it proceeds towards the bottom of the
     "Page.frameScheduledNavigation": Page.frameScheduledNavigationPayload;
     "Page.frameClearedScheduledNavigation": Page.frameClearedScheduledNavigationPayload;
     "Page.navigatedWithinDocument": Page.navigatedWithinDocumentPayload;
-    "Page.defaultAppearanceDidChange": Page.defaultAppearanceDidChangePayload;
-    "Page.willRequestOpenWindow": Page.willRequestOpenWindowPayload;
-    "Page.didRequestOpenWindow": Page.didRequestOpenWindowPayload;
+    "Page.defaultUserPreferencesDidChange": Page.defaultUserPreferencesDidChangePayload;
+    "Page.willCheckNavigationPolicy": Page.willCheckNavigationPolicyPayload;
+    "Page.didCheckNavigationPolicy": Page.didCheckNavigationPolicyPayload;
     "Page.fileChooserOpened": Page.fileChooserOpenedPayload;
     "Playwright.pageProxyCreated": Playwright.pageProxyCreatedPayload;
     "Playwright.pageProxyDestroyed": Playwright.pageProxyDestroyedPayload;
@@ -8772,6 +9374,7 @@ the top of the viewport and Y increases as it proceeds towards the bottom of the
     "Playwright.downloadFinished": Playwright.downloadFinishedPayload;
     "Playwright.screencastFinished": Playwright.screencastFinishedPayload;
     "Runtime.executionContextCreated": Runtime.executionContextCreatedPayload;
+    "Runtime.bindingCalled": Runtime.bindingCalledPayload;
     "Screencast.screencastFrame": Screencast.screencastFramePayload;
     "ScriptProfiler.trackingStart": ScriptProfiler.trackingStartPayload;
     "ScriptProfiler.trackingUpdate": ScriptProfiler.trackingUpdatePayload;
@@ -8819,6 +9422,7 @@ the top of the viewport and Y increases as it proceeds towards the bottom of the
     "CSS.setStyleSheetText": CSS.setStyleSheetTextParameters;
     "CSS.setStyleText": CSS.setStyleTextParameters;
     "CSS.setRuleSelector": CSS.setRuleSelectorParameters;
+    "CSS.setGroupingHeaderText": CSS.setGroupingHeaderTextParameters;
     "CSS.createStyleSheet": CSS.createStyleSheetParameters;
     "CSS.addRule": CSS.addRuleParameters;
     "CSS.getSupportedCSSProperties": CSS.getSupportedCSSPropertiesParameters;
@@ -8841,6 +9445,7 @@ the top of the viewport and Y increases as it proceeds towards the bottom of the
     "Console.enable": Console.enableParameters;
     "Console.disable": Console.disableParameters;
     "Console.clearMessages": Console.clearMessagesParameters;
+    "Console.setConsoleClearAPIEnabled": Console.setConsoleClearAPIEnabledParameters;
     "Console.getLoggingChannels": Console.getLoggingChannelsParameters;
     "Console.setLoggingChannelLevel": Console.setLoggingChannelLevelParameters;
     "DOM.getDocument": DOM.getDocumentParameters;
@@ -8878,6 +9483,8 @@ the top of the viewport and Y increases as it proceeds towards the bottom of the
     "DOM.highlightFrame": DOM.highlightFrameParameters;
     "DOM.showGridOverlay": DOM.showGridOverlayParameters;
     "DOM.hideGridOverlay": DOM.hideGridOverlayParameters;
+    "DOM.showFlexOverlay": DOM.showFlexOverlayParameters;
+    "DOM.hideFlexOverlay": DOM.hideFlexOverlayParameters;
     "DOM.pushNodeByPathToFrontend": DOM.pushNodeByPathToFrontendParameters;
     "DOM.resolveNode": DOM.resolveNodeParameters;
     "DOM.getAttributes": DOM.getAttributesParameters;
@@ -8888,6 +9495,7 @@ the top of the viewport and Y increases as it proceeds towards the bottom of the
     "DOM.focus": DOM.focusParameters;
     "DOM.setInspectedNode": DOM.setInspectedNodeParameters;
     "DOM.setAllowEditingUserAgentShadowTrees": DOM.setAllowEditingUserAgentShadowTreesParameters;
+    "DOM.getMediaStats": DOM.getMediaStatsParameters;
     "DOM.describeNode": DOM.describeNodeParameters;
     "DOM.scrollIntoViewIfNeeded": DOM.scrollIntoViewIfNeededParameters;
     "DOM.getContentQuads": DOM.getContentQuadsParameters;
@@ -8915,6 +9523,8 @@ the top of the viewport and Y increases as it proceeds towards the bottom of the
     "Debugger.setBreakpointByUrl": Debugger.setBreakpointByUrlParameters;
     "Debugger.setBreakpoint": Debugger.setBreakpointParameters;
     "Debugger.removeBreakpoint": Debugger.removeBreakpointParameters;
+    "Debugger.addSymbolicBreakpoint": Debugger.addSymbolicBreakpointParameters;
+    "Debugger.removeSymbolicBreakpoint": Debugger.removeSymbolicBreakpointParameters;
     "Debugger.continueUntilNextRunLoop": Debugger.continueUntilNextRunLoopParameters;
     "Debugger.continueToLocation": Debugger.continueToLocationParameters;
     "Debugger.stepNext": Debugger.stepNextParameters;
@@ -8926,6 +9536,7 @@ the top of the viewport and Y increases as it proceeds towards the bottom of the
     "Debugger.searchInContent": Debugger.searchInContentParameters;
     "Debugger.getScriptSource": Debugger.getScriptSourceParameters;
     "Debugger.getFunctionDetails": Debugger.getFunctionDetailsParameters;
+    "Debugger.getBreakpointLocations": Debugger.getBreakpointLocationsParameters;
     "Debugger.setPauseOnDebuggerStatements": Debugger.setPauseOnDebuggerStatementsParameters;
     "Debugger.setPauseOnExceptions": Debugger.setPauseOnExceptionsParameters;
     "Debugger.setPauseOnAssertions": Debugger.setPauseOnAssertionsParameters;
@@ -8933,6 +9544,7 @@ the top of the viewport and Y increases as it proceeds towards the bottom of the
     "Debugger.setPauseForInternalScripts": Debugger.setPauseForInternalScriptsParameters;
     "Debugger.evaluateOnCallFrame": Debugger.evaluateOnCallFrameParameters;
     "Debugger.setShouldBlackboxURL": Debugger.setShouldBlackboxURLParameters;
+    "Debugger.setBlackboxBreakpointEvaluations": Debugger.setBlackboxBreakpointEvaluationsParameters;
     "Dialog.enable": Dialog.enableParameters;
     "Dialog.disable": Dialog.disableParameters;
     "Dialog.handleJavaScriptDialog": Dialog.handleJavaScriptDialogParameters;
@@ -8942,6 +9554,7 @@ the top of the viewport and Y increases as it proceeds towards the bottom of the
     "Emulation.setActiveAndFocused": Emulation.setActiveAndFocusedParameters;
     "Emulation.grantPermissions": Emulation.grantPermissionsParameters;
     "Emulation.resetPermissions": Emulation.resetPermissionsParameters;
+    "Emulation.setOrientationOverride": Emulation.setOrientationOverrideParameters;
     "Heap.enable": Heap.enableParameters;
     "Heap.disable": Heap.disableParameters;
     "Heap.gc": Heap.gcParameters;
@@ -8960,6 +9573,7 @@ the top of the viewport and Y increases as it proceeds towards the bottom of the
     "Input.dispatchMouseEvent": Input.dispatchMouseEventParameters;
     "Input.dispatchWheelEvent": Input.dispatchWheelEventParameters;
     "Input.dispatchTapEvent": Input.dispatchTapEventParameters;
+    "Input.dispatchTouchEvent": Input.dispatchTouchEventParameters;
     "Inspector.enable": Inspector.enableParameters;
     "Inspector.disable": Inspector.disableParameters;
     "Inspector.initialized": Inspector.initializedParameters;
@@ -8987,6 +9601,7 @@ the top of the viewport and Y increases as it proceeds towards the bottom of the
     "Network.interceptWithResponse": Network.interceptWithResponseParameters;
     "Network.interceptRequestWithResponse": Network.interceptRequestWithResponseParameters;
     "Network.interceptRequestWithError": Network.interceptRequestWithErrorParameters;
+    "Network.setEmulatedConditions": Network.setEmulatedConditionsParameters;
     "Network.setEmulateOfflineState": Network.setEmulateOfflineStateParameters;
     "Page.enable": Page.enableParameters;
     "Page.disable": Page.disableParameters;
@@ -8997,6 +9612,7 @@ the top of the viewport and Y increases as it proceeds towards the bottom of the
     "Page.overrideUserAgent": Page.overrideUserAgentParameters;
     "Page.overridePlatform": Page.overridePlatformParameters;
     "Page.overrideSetting": Page.overrideSettingParameters;
+    "Page.overrideUserPreference": Page.overrideUserPreferenceParameters;
     "Page.getCookies": Page.getCookiesParameters;
     "Page.setCookie": Page.setCookieParameters;
     "Page.deleteCookie": Page.deleteCookieParameters;
@@ -9008,8 +9624,7 @@ the top of the viewport and Y increases as it proceeds towards the bottom of the
     "Page.setShowRulers": Page.setShowRulersParameters;
     "Page.setShowPaintRects": Page.setShowPaintRectsParameters;
     "Page.setEmulatedMedia": Page.setEmulatedMediaParameters;
-    "Page.setForcedAppearance": Page.setForcedAppearanceParameters;
-    "Page.setForcedReducedMotion": Page.setForcedReducedMotionParameters;
+    "Page.setForcedColors": Page.setForcedColorsParameters;
     "Page.setTimeZone": Page.setTimeZoneParameters;
     "Page.setTouchEmulationEnabled": Page.setTouchEmulationEnabledParameters;
     "Page.snapshotNode": Page.snapshotNodeParameters;
@@ -9017,23 +9632,23 @@ the top of the viewport and Y increases as it proceeds towards the bottom of the
     "Page.archive": Page.archiveParameters;
     "Page.setScreenSizeOverride": Page.setScreenSizeOverrideParameters;
     "Page.insertText": Page.insertTextParameters;
-    "Page.setComposition": Page.setCompositionParameters;
     "Page.accessibilitySnapshot": Page.accessibilitySnapshotParameters;
     "Page.setInterceptFileChooserDialog": Page.setInterceptFileChooserDialogParameters;
     "Page.setDefaultBackgroundColorOverride": Page.setDefaultBackgroundColorOverrideParameters;
     "Page.createUserWorld": Page.createUserWorldParameters;
     "Page.setBypassCSP": Page.setBypassCSPParameters;
     "Page.crash": Page.crashParameters;
-    "Page.setOrientationOverride": Page.setOrientationOverrideParameters;
-    "Page.setVisibleContentRects": Page.setVisibleContentRectsParameters;
     "Page.updateScrollingState": Page.updateScrollingStateParameters;
     "Playwright.enable": Playwright.enableParameters;
     "Playwright.disable": Playwright.disableParameters;
+    "Playwright.getInfo": Playwright.getInfoParameters;
     "Playwright.close": Playwright.closeParameters;
     "Playwright.createContext": Playwright.createContextParameters;
     "Playwright.deleteContext": Playwright.deleteContextParameters;
     "Playwright.createPage": Playwright.createPageParameters;
     "Playwright.navigate": Playwright.navigateParameters;
+    "Playwright.grantFileReadAccess": Playwright.grantFileReadAccessParameters;
+    "Playwright.takePageScreenshot": Playwright.takePageScreenshotParameters;
     "Playwright.setIgnoreCertificateErrors": Playwright.setIgnoreCertificateErrorsParameters;
     "Playwright.getAllCookies": Playwright.getAllCookiesParameters;
     "Playwright.setCookies": Playwright.setCookiesParameters;
@@ -9042,10 +9657,12 @@ the top of the viewport and Y increases as it proceeds towards the bottom of the
     "Playwright.setLanguages": Playwright.setLanguagesParameters;
     "Playwright.setDownloadBehavior": Playwright.setDownloadBehaviorParameters;
     "Playwright.cancelDownload": Playwright.cancelDownloadParameters;
+    "Playwright.clearMemoryCache": Playwright.clearMemoryCacheParameters;
     "Runtime.parse": Runtime.parseParameters;
     "Runtime.evaluate": Runtime.evaluateParameters;
     "Runtime.awaitPromise": Runtime.awaitPromiseParameters;
     "Runtime.callFunctionOn": Runtime.callFunctionOnParameters;
+    "Runtime.addBinding": Runtime.addBindingParameters;
     "Runtime.getPreview": Runtime.getPreviewParameters;
     "Runtime.getProperties": Runtime.getPropertiesParameters;
     "Runtime.getDisplayableProperties": Runtime.getDisplayablePropertiesParameters;
@@ -9117,6 +9734,7 @@ the top of the viewport and Y increases as it proceeds towards the bottom of the
     "CSS.setStyleSheetText": CSS.setStyleSheetTextReturnValue;
     "CSS.setStyleText": CSS.setStyleTextReturnValue;
     "CSS.setRuleSelector": CSS.setRuleSelectorReturnValue;
+    "CSS.setGroupingHeaderText": CSS.setGroupingHeaderTextReturnValue;
     "CSS.createStyleSheet": CSS.createStyleSheetReturnValue;
     "CSS.addRule": CSS.addRuleReturnValue;
     "CSS.getSupportedCSSProperties": CSS.getSupportedCSSPropertiesReturnValue;
@@ -9139,6 +9757,7 @@ the top of the viewport and Y increases as it proceeds towards the bottom of the
     "Console.enable": Console.enableReturnValue;
     "Console.disable": Console.disableReturnValue;
     "Console.clearMessages": Console.clearMessagesReturnValue;
+    "Console.setConsoleClearAPIEnabled": Console.setConsoleClearAPIEnabledReturnValue;
     "Console.getLoggingChannels": Console.getLoggingChannelsReturnValue;
     "Console.setLoggingChannelLevel": Console.setLoggingChannelLevelReturnValue;
     "DOM.getDocument": DOM.getDocumentReturnValue;
@@ -9176,6 +9795,8 @@ the top of the viewport and Y increases as it proceeds towards the bottom of the
     "DOM.highlightFrame": DOM.highlightFrameReturnValue;
     "DOM.showGridOverlay": DOM.showGridOverlayReturnValue;
     "DOM.hideGridOverlay": DOM.hideGridOverlayReturnValue;
+    "DOM.showFlexOverlay": DOM.showFlexOverlayReturnValue;
+    "DOM.hideFlexOverlay": DOM.hideFlexOverlayReturnValue;
     "DOM.pushNodeByPathToFrontend": DOM.pushNodeByPathToFrontendReturnValue;
     "DOM.resolveNode": DOM.resolveNodeReturnValue;
     "DOM.getAttributes": DOM.getAttributesReturnValue;
@@ -9186,6 +9807,7 @@ the top of the viewport and Y increases as it proceeds towards the bottom of the
     "DOM.focus": DOM.focusReturnValue;
     "DOM.setInspectedNode": DOM.setInspectedNodeReturnValue;
     "DOM.setAllowEditingUserAgentShadowTrees": DOM.setAllowEditingUserAgentShadowTreesReturnValue;
+    "DOM.getMediaStats": DOM.getMediaStatsReturnValue;
     "DOM.describeNode": DOM.describeNodeReturnValue;
     "DOM.scrollIntoViewIfNeeded": DOM.scrollIntoViewIfNeededReturnValue;
     "DOM.getContentQuads": DOM.getContentQuadsReturnValue;
@@ -9213,6 +9835,8 @@ the top of the viewport and Y increases as it proceeds towards the bottom of the
     "Debugger.setBreakpointByUrl": Debugger.setBreakpointByUrlReturnValue;
     "Debugger.setBreakpoint": Debugger.setBreakpointReturnValue;
     "Debugger.removeBreakpoint": Debugger.removeBreakpointReturnValue;
+    "Debugger.addSymbolicBreakpoint": Debugger.addSymbolicBreakpointReturnValue;
+    "Debugger.removeSymbolicBreakpoint": Debugger.removeSymbolicBreakpointReturnValue;
     "Debugger.continueUntilNextRunLoop": Debugger.continueUntilNextRunLoopReturnValue;
     "Debugger.continueToLocation": Debugger.continueToLocationReturnValue;
     "Debugger.stepNext": Debugger.stepNextReturnValue;
@@ -9224,6 +9848,7 @@ the top of the viewport and Y increases as it proceeds towards the bottom of the
     "Debugger.searchInContent": Debugger.searchInContentReturnValue;
     "Debugger.getScriptSource": Debugger.getScriptSourceReturnValue;
     "Debugger.getFunctionDetails": Debugger.getFunctionDetailsReturnValue;
+    "Debugger.getBreakpointLocations": Debugger.getBreakpointLocationsReturnValue;
     "Debugger.setPauseOnDebuggerStatements": Debugger.setPauseOnDebuggerStatementsReturnValue;
     "Debugger.setPauseOnExceptions": Debugger.setPauseOnExceptionsReturnValue;
     "Debugger.setPauseOnAssertions": Debugger.setPauseOnAssertionsReturnValue;
@@ -9231,6 +9856,7 @@ the top of the viewport and Y increases as it proceeds towards the bottom of the
     "Debugger.setPauseForInternalScripts": Debugger.setPauseForInternalScriptsReturnValue;
     "Debugger.evaluateOnCallFrame": Debugger.evaluateOnCallFrameReturnValue;
     "Debugger.setShouldBlackboxURL": Debugger.setShouldBlackboxURLReturnValue;
+    "Debugger.setBlackboxBreakpointEvaluations": Debugger.setBlackboxBreakpointEvaluationsReturnValue;
     "Dialog.enable": Dialog.enableReturnValue;
     "Dialog.disable": Dialog.disableReturnValue;
     "Dialog.handleJavaScriptDialog": Dialog.handleJavaScriptDialogReturnValue;
@@ -9240,6 +9866,7 @@ the top of the viewport and Y increases as it proceeds towards the bottom of the
     "Emulation.setActiveAndFocused": Emulation.setActiveAndFocusedReturnValue;
     "Emulation.grantPermissions": Emulation.grantPermissionsReturnValue;
     "Emulation.resetPermissions": Emulation.resetPermissionsReturnValue;
+    "Emulation.setOrientationOverride": Emulation.setOrientationOverrideReturnValue;
     "Heap.enable": Heap.enableReturnValue;
     "Heap.disable": Heap.disableReturnValue;
     "Heap.gc": Heap.gcReturnValue;
@@ -9258,6 +9885,7 @@ the top of the viewport and Y increases as it proceeds towards the bottom of the
     "Input.dispatchMouseEvent": Input.dispatchMouseEventReturnValue;
     "Input.dispatchWheelEvent": Input.dispatchWheelEventReturnValue;
     "Input.dispatchTapEvent": Input.dispatchTapEventReturnValue;
+    "Input.dispatchTouchEvent": Input.dispatchTouchEventReturnValue;
     "Inspector.enable": Inspector.enableReturnValue;
     "Inspector.disable": Inspector.disableReturnValue;
     "Inspector.initialized": Inspector.initializedReturnValue;
@@ -9285,6 +9913,7 @@ the top of the viewport and Y increases as it proceeds towards the bottom of the
     "Network.interceptWithResponse": Network.interceptWithResponseReturnValue;
     "Network.interceptRequestWithResponse": Network.interceptRequestWithResponseReturnValue;
     "Network.interceptRequestWithError": Network.interceptRequestWithErrorReturnValue;
+    "Network.setEmulatedConditions": Network.setEmulatedConditionsReturnValue;
     "Network.setEmulateOfflineState": Network.setEmulateOfflineStateReturnValue;
     "Page.enable": Page.enableReturnValue;
     "Page.disable": Page.disableReturnValue;
@@ -9295,6 +9924,7 @@ the top of the viewport and Y increases as it proceeds towards the bottom of the
     "Page.overrideUserAgent": Page.overrideUserAgentReturnValue;
     "Page.overridePlatform": Page.overridePlatformReturnValue;
     "Page.overrideSetting": Page.overrideSettingReturnValue;
+    "Page.overrideUserPreference": Page.overrideUserPreferenceReturnValue;
     "Page.getCookies": Page.getCookiesReturnValue;
     "Page.setCookie": Page.setCookieReturnValue;
     "Page.deleteCookie": Page.deleteCookieReturnValue;
@@ -9306,8 +9936,7 @@ the top of the viewport and Y increases as it proceeds towards the bottom of the
     "Page.setShowRulers": Page.setShowRulersReturnValue;
     "Page.setShowPaintRects": Page.setShowPaintRectsReturnValue;
     "Page.setEmulatedMedia": Page.setEmulatedMediaReturnValue;
-    "Page.setForcedAppearance": Page.setForcedAppearanceReturnValue;
-    "Page.setForcedReducedMotion": Page.setForcedReducedMotionReturnValue;
+    "Page.setForcedColors": Page.setForcedColorsReturnValue;
     "Page.setTimeZone": Page.setTimeZoneReturnValue;
     "Page.setTouchEmulationEnabled": Page.setTouchEmulationEnabledReturnValue;
     "Page.snapshotNode": Page.snapshotNodeReturnValue;
@@ -9315,23 +9944,23 @@ the top of the viewport and Y increases as it proceeds towards the bottom of the
     "Page.archive": Page.archiveReturnValue;
     "Page.setScreenSizeOverride": Page.setScreenSizeOverrideReturnValue;
     "Page.insertText": Page.insertTextReturnValue;
-    "Page.setComposition": Page.setCompositionReturnValue;
     "Page.accessibilitySnapshot": Page.accessibilitySnapshotReturnValue;
     "Page.setInterceptFileChooserDialog": Page.setInterceptFileChooserDialogReturnValue;
     "Page.setDefaultBackgroundColorOverride": Page.setDefaultBackgroundColorOverrideReturnValue;
     "Page.createUserWorld": Page.createUserWorldReturnValue;
     "Page.setBypassCSP": Page.setBypassCSPReturnValue;
     "Page.crash": Page.crashReturnValue;
-    "Page.setOrientationOverride": Page.setOrientationOverrideReturnValue;
-    "Page.setVisibleContentRects": Page.setVisibleContentRectsReturnValue;
     "Page.updateScrollingState": Page.updateScrollingStateReturnValue;
     "Playwright.enable": Playwright.enableReturnValue;
     "Playwright.disable": Playwright.disableReturnValue;
+    "Playwright.getInfo": Playwright.getInfoReturnValue;
     "Playwright.close": Playwright.closeReturnValue;
     "Playwright.createContext": Playwright.createContextReturnValue;
     "Playwright.deleteContext": Playwright.deleteContextReturnValue;
     "Playwright.createPage": Playwright.createPageReturnValue;
     "Playwright.navigate": Playwright.navigateReturnValue;
+    "Playwright.grantFileReadAccess": Playwright.grantFileReadAccessReturnValue;
+    "Playwright.takePageScreenshot": Playwright.takePageScreenshotReturnValue;
     "Playwright.setIgnoreCertificateErrors": Playwright.setIgnoreCertificateErrorsReturnValue;
     "Playwright.getAllCookies": Playwright.getAllCookiesReturnValue;
     "Playwright.setCookies": Playwright.setCookiesReturnValue;
@@ -9340,10 +9969,12 @@ the top of the viewport and Y increases as it proceeds towards the bottom of the
     "Playwright.setLanguages": Playwright.setLanguagesReturnValue;
     "Playwright.setDownloadBehavior": Playwright.setDownloadBehaviorReturnValue;
     "Playwright.cancelDownload": Playwright.cancelDownloadReturnValue;
+    "Playwright.clearMemoryCache": Playwright.clearMemoryCacheReturnValue;
     "Runtime.parse": Runtime.parseReturnValue;
     "Runtime.evaluate": Runtime.evaluateReturnValue;
     "Runtime.awaitPromise": Runtime.awaitPromiseReturnValue;
     "Runtime.callFunctionOn": Runtime.callFunctionOnReturnValue;
+    "Runtime.addBinding": Runtime.addBindingReturnValue;
     "Runtime.getPreview": Runtime.getPreviewReturnValue;
     "Runtime.getProperties": Runtime.getPropertiesReturnValue;
     "Runtime.getDisplayableProperties": Runtime.getDisplayablePropertiesReturnValue;

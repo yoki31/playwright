@@ -19,7 +19,7 @@ import { test, expect } from './playwright-test-fixtures';
 test('should get top level stdio', async ({ runInlineTest }) => {
   const result = await runInlineTest({
     'a.spec.js': `
-      const { test } = pwt;
+      import { test, expect } from '@playwright/test';
       console.log('\\n%% top level stdout');
       console.error('\\n%% top level stderr');
       test('is a test', () => {
@@ -29,20 +29,21 @@ test('should get top level stdio', async ({ runInlineTest }) => {
     `
   });
   // top level logs appear twice, because the file is required twice
-  expect(result.output.split('\n').filter(x => x.startsWith('%%')).sort()).toEqual([
-    '%% stderr in a test',
-    '%% stdout in a test',
-    '%% top level stderr',
-    '%% top level stderr',
-    '%% top level stdout',
-    '%% top level stdout',
+  expect(result.outputLines.sort()).toEqual([
+    'stderr in a test',
+    'stdout in a test',
+    'top level stderr',
+    'top level stderr',
+    'top level stdout',
+    'top level stdout',
   ]);
 });
 
 test('should get stdio from worker fixture teardown', async ({ runInlineTest }) => {
   const result = await runInlineTest({
     'helper.ts': `
-      export const test = pwt.test.extend({
+      import { test as base, expect } from '@playwright/test';
+      export const test = base.extend({
         fixture: [ async ({}, run) => {
           console.log('\\n%% worker setup');
           await run();
@@ -55,9 +56,9 @@ test('should get stdio from worker fixture teardown', async ({ runInlineTest }) 
       test('is a test', async ({fixture}) => {});
     `
   });
-  expect(result.output.split('\n').filter(x => x.startsWith('%%'))).toEqual([
-    '%% worker setup',
-    '%% worker teardown'
+  expect(result.outputLines).toEqual([
+    'worker setup',
+    'worker teardown'
   ]);
 });
 
@@ -67,12 +68,52 @@ test('should ignore stdio when quiet', async ({ runInlineTest }) => {
       module.exports = { quiet: true };
     `,
     'a.spec.js': `
-      const { test } = pwt;
+      import { test, expect } from '@playwright/test';
       test('is a test', () => {
         console.log('\\n%% stdout in a test');
         console.error('\\n%% stderr in a test');
       });
     `
-  }, { reporter: 'list' }, { PWTEST_SKIP_TEST_OUTPUT: '' });
+  }, { reporter: 'list' });
   expect(result.output).not.toContain('%%');
+});
+
+test('should support console colors but not tty', {
+  annotation: [
+    { type: 'issue', description: 'https://github.com/microsoft/playwright/issues/15366' },
+    { type: 'issue', description: 'https://github.com/microsoft/playwright/issues/29839' },
+  ],
+}, async ({ runInlineTest, nodeVersion }) => {
+  test.skip(nodeVersion.major < 18, 'Node16 does not respect FORCE_COLOR in onsole');
+
+  const result = await runInlineTest({
+    'a.spec.js': `
+      import { test, expect } from '@playwright/test';
+      test('console log', () => {
+        console.log('process.stdout.isTTY = ' + process.stdout.isTTY);
+        console.log('process.stderr.isTTY = ' + process.stderr.isTTY);
+        console.log({ b: true, n: 123, s: 'abc' });
+        console.error({ b: false, n: 123, s: 'abc' });
+      });
+    `
+  });
+  expect(result.output).toContain(`process.stdout.isTTY = undefined`);
+  expect(result.output).toContain(`process.stderr.isTTY = undefined`);
+  // The output should have colors.
+  expect(result.rawOutput).toContain(`{ b: \x1b[33mtrue\x1b[39m, n: \x1b[33m123\x1b[39m, s: \x1b[32m'abc'\x1b[39m }`);
+  expect(result.rawOutput).toContain(`{ b: \x1b[33mfalse\x1b[39m, n: \x1b[33m123\x1b[39m, s: \x1b[32m'abc'\x1b[39m }`);
+});
+
+test('should not throw type error when using assert', async ({ runInlineTest }) => {
+  const result = await runInlineTest({
+    'a.spec.js': `
+      import { test, expect } from '@playwright/test';
+      const assert = require('assert');
+      test('assert no type error', () => {
+        assert.strictEqual(1, 2);
+      });
+    `
+  });
+  expect(result.output).not.toContain(`TypeError: process.stderr.hasColors is not a function`);
+  expect(result.output).toContain(`AssertionError`);
 });

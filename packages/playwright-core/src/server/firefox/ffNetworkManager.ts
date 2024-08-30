@@ -15,14 +15,15 @@
  * limitations under the License.
  */
 
-import { eventsHelper, RegisteredListener } from '../../utils/eventsHelper';
-import { FFSession } from './ffConnection';
-import { Page } from '../page';
+import type { RegisteredListener } from '../../utils/eventsHelper';
+import { eventsHelper } from '../../utils/eventsHelper';
+import type { FFSession } from './ffConnection';
+import type { Page } from '../page';
 import * as network from '../network';
-import * as frames from '../frames';
-import * as types from '../types';
-import { Protocol } from './protocol';
-import { HeadersArray } from '../../server/types';
+import type * as frames from '../frames';
+import type * as types from '../types';
+import type { Protocol } from './protocol';
+import type { HeadersArray } from '../../server/types';
 
 export class FFNetworkManager {
   private _session: FFSession;
@@ -49,7 +50,10 @@ export class FFNetworkManager {
   }
 
   async setRequestInterception(enabled: boolean) {
-    await this._session.send('Network.setRequestInterception', { enabled });
+    await Promise.all([
+      this._session.send('Network.setRequestInterception', { enabled }),
+      this._session.send('Page.setCacheDisabled', { cacheDisabled: enabled }),
+    ]);
   }
 
   _onRequestWillBeSent(event: Protocol.Network.requestWillBeSentPayload) {
@@ -96,7 +100,7 @@ export class FFNetworkManager {
       requestStart: relativeToStart(event.timing.requestStart),
       responseStart: relativeToStart(event.timing.responseStart),
     };
-    const response = new network.Response(request.request, event.status, event.statusText, parseMultivalueHeaders(event.headers), timing, getResponseBody);
+    const response = new network.Response(request.request, event.status, event.statusText, parseMultivalueHeaders(event.headers), timing, getResponseBody, event.fromServiceWorker);
     if (event?.remoteIPAddress && typeof event?.remotePort === 'number') {
       response._serverAddrFinished({
         ipAddress: event.remoteIPAddress,
@@ -112,6 +116,10 @@ export class FFNetworkManager {
       validFrom: event?.securityDetails?.validFrom,
       validTo: event?.securityDetails?.validTo,
     });
+    // "raw" headers are the same as "provisional" headers in Firefox.
+    response.setRawResponseHeaders(null);
+    // Headers size are not available in Firefox.
+    response.setResponseHeadersSize(null);
     this._page._frameManager.requestReceivedResponse(response);
   }
 
@@ -120,7 +128,8 @@ export class FFNetworkManager {
     if (!request)
       return;
     const response = request.request._existingResponse()!;
-    request.request.responseSize.transferSize = event.transferSize;
+    response.setTransferSize(event.transferSize);
+    response.setEncodedBodySize(event.encodedBodySize);
 
     // Keep redirected requests in the map for future reference as redirectedFrom.
     const isRedirected = response.status() >= 300 && response.status() <= 399;
@@ -142,8 +151,11 @@ export class FFNetworkManager {
       return;
     this._requests.delete(request._id);
     const response = request.request._existingResponse();
-    if (response)
+    if (response) {
+      response.setTransferSize(null);
+      response.setEncodedBodySize(null);
       response._requestFinished(-1);
+    }
     request.request._setFailureText(event.errorCode);
     this._page._frameManager.requestFailed(request.request, event.errorCode === 'NS_BINDING_ABORTED');
   }
@@ -191,8 +203,10 @@ class InterceptableRequest {
     let postDataBuffer = null;
     if (payload.postData)
       postDataBuffer = Buffer.from(payload.postData, 'base64');
-    this.request = new network.Request(frame, redirectedFrom ? redirectedFrom.request : null, payload.navigationId,
+    this.request = new network.Request(frame._page._browserContext, frame, null, redirectedFrom ? redirectedFrom.request : null, payload.navigationId,
         payload.url, internalCauseToResourceType[payload.internalCause] || causeToResourceType[payload.cause] || 'other', payload.method, postDataBuffer, payload.headers);
+    // "raw" headers are the same as "provisional" headers in Firefox.
+    this.request.setRawRequestHeaders(null);
   }
 
   _finalRequest(): InterceptableRequest {
@@ -212,7 +226,7 @@ class FFRouteImpl implements network.RouteDelegate {
     this._request = request;
   }
 
-  async continue(request: network.Request, overrides: types.NormalizedContinueOverrides) {
+  async continue(overrides: types.NormalizedContinueOverrides) {
     await this._session.sendMayFail('Network.resumeInterceptedRequest', {
       requestId: this._request._id,
       url: overrides.url,
@@ -228,7 +242,7 @@ class FFRouteImpl implements network.RouteDelegate {
     await this._session.sendMayFail('Network.fulfillInterceptedRequest', {
       requestId: this._request._id,
       status: response.status,
-      statusText: network.STATUS_TEXTS[String(response.status)] || '',
+      statusText: network.statusText(response.status),
       headers: response.headers,
       base64body,
     });

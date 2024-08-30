@@ -17,7 +17,7 @@
 
 import { test as it, expect } from './pageTest';
 
-it('should work #smoke', async ({ page }) => {
+it('should work @smoke', async ({ page }) => {
   const aHandle = await page.evaluateHandle(() => ({ foo: 'bar' }));
   const json = await aHandle.jsonValue();
   expect(json).toEqual({ foo: 'bar' });
@@ -29,9 +29,9 @@ it('should work with dates', async ({ page }) => {
   expect(date.toJSON()).toBe('2017-09-26T00:00:00.000Z');
 });
 
-it('should throw for circular objects', async ({ page }) => {
-  const windowHandle = await page.evaluateHandle('window');
-  let error = null;
-  await windowHandle.jsonValue().catch(e => error = e);
-  expect(error.message).toContain('Argument is a circular structure');
+it('should handle circular objects', async ({ page }) => {
+  const handle = await page.evaluateHandle('const a = {}; a.b = a; a');
+  const a: any = {};
+  a.b = a;
+  expect(await handle.jsonValue()).toEqual(a);
 });

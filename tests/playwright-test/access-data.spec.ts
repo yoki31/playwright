@@ -19,7 +19,8 @@ import { test, expect } from './playwright-test-fixtures';
 test('should access error in fixture', async ({ runInlineTest }) => {
   const result = await runInlineTest({
     'test-error-visible-in-env.spec.ts': `
-      const test = pwt.test.extend({
+      import { test as base, expect } from '@playwright/test';
+      const test = base.extend({
         foo: [async ({}, run, testInfo) => {
           await run();
           console.log('ERROR[[[' + JSON.stringify(testInfo.error, undefined, 2) + ']]]');
@@ -40,7 +41,8 @@ test('should access error in fixture', async ({ runInlineTest }) => {
 test('should access annotations in fixture', async ({ runInlineTest }) => {
   const { exitCode, report } = await runInlineTest({
     'test-data-visible-in-env.spec.ts': `
-      const test = pwt.test.extend({
+      import { test as base, expect } from '@playwright/test';
+      const test = base.extend({
         foo: [async ({}, run, testInfo) => {
           await run();
           testInfo.annotations.push({ type: 'myname', description: 'hello' });
@@ -58,7 +60,7 @@ test('should access annotations in fixture', async ({ runInlineTest }) => {
   });
   expect(exitCode).toBe(0);
   const test = report.suites[0].specs[0].tests[0];
-  expect(test.annotations).toEqual([ { type: 'slow', description: 'just slow' }, { type: 'myname', description: 'hello' } ]);
+  expect(test.annotations).toEqual([{ type: 'slow', description: 'just slow' }, { type: 'myname', description: 'hello' }]);
   expect(test.results[0].stdout).toEqual([{ text: 'console.log\n' }]);
   expect(test.results[0].stderr).toEqual([{ text: 'console.error\n' }]);
 });
@@ -74,7 +76,8 @@ test('should report projectName in result', async ({ runInlineTest }) => {
       };
     `,
     'test-data-visible-in-env.spec.ts': `
-      pwt.test('some test', async ({}, testInfo) => {
+      import { test, expect } from '@playwright/test';
+      test('some test', async ({}, testInfo) => {
       });
     `
   });
@@ -86,7 +89,8 @@ test('should report projectName in result', async ({ runInlineTest }) => {
 test('should access testInfo.attachments in fixture', async ({ runInlineTest }) => {
   const { exitCode, report } = await runInlineTest({
     'test-data-visible-in-env.spec.ts': `
-      const test = pwt.test.extend({
+      import { test as base, expect } from '@playwright/test';
+      const test = base.extend({
         foo: async ({}, run, testInfo) => {
           await run();
           testInfo.attachments.push({ name: 'foo', body: Buffer.from([1, 2, 3]), contentType: 'application/octet-stream' });

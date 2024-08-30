@@ -19,9 +19,12 @@
 const fs = require('fs');
 const path = require('path');
 const md = require('../markdown');
-const Documentation = require('./documentation');
+const docs = require('./documentation');
 
 /** @typedef {import('../markdown').MarkdownNode} MarkdownNode */
+/** @typedef {import('../markdown').MarkdownHeaderNode} MarkdownHeaderNode */
+/** @typedef {import('../markdown').MarkdownLiNode} MarkdownLiNode */
+/** @typedef {import('../markdown').MarkdownTextNode} MarkdownTextNode */
 
 class ApiParser {
   /**
@@ -39,9 +42,10 @@ class ApiParser {
         bodyParts.push(fs.readFileSync(path.join(apiDir, name)).toString());
     }
     const body = md.parse(bodyParts.join('\n'));
-    const params = paramsPath ? md.parse(fs.readFileSync(paramsPath).toString()) : null;
+    const params = paramsPath ? md.parse(fs.readFileSync(paramsPath).toString()) : undefined;
+    checkNoDuplicateParamEntries(params);
     const api = params ? applyTemplates(body, params) : body;
-    /** @type {Map<string, Documentation.Class>} */
+    /** @type {Map<string, docs.Class>} */
     this.classes = new Map();
     md.visitAll(api, node => {
       if (node.type === 'h1')
@@ -55,12 +59,12 @@ class ApiParser {
       if (node.type === 'h3')
         this.parseArgument(node);
     });
-    this.documentation = new Documentation([...this.classes.values()]);
+    this.documentation = new docs.Documentation([...this.classes.values()]);
     this.documentation.index();
   }
 
   /**
-   * @param {MarkdownNode} node
+   * @param {MarkdownHeaderNode} node
    */
   parseClass(node) {
     let extendsName = null;
@@ -73,41 +77,60 @@ class ApiParser {
         continue;
       }
     }
-    const clazz = new Documentation.Class(extractLangs(node), name, [], extendsName, extractComments(node));
+    const metainfo = extractMetainfo(node);
+    const clazz = new docs.Class(metainfo, name, [], extendsName, extractComments(node));
+    if (metainfo.hidden)
+      return;
     this.classes.set(clazz.name, clazz);
   }
 
 
   /**
-   * @param {MarkdownNode} spec
+   * @param {MarkdownHeaderNode} spec
    */
   parseMember(spec) {
-    const match = spec.text.match(/(event|method|property|async method): ([^.]+)\.(.*)/);
+    const match = spec.text.match(/(event|method|property|async method|optional method|optional async method): ([^.]+)\.(.*)/);
     if (!match)
       throw new Error('Invalid member: ' + spec.text);
+    const metainfo = extractMetainfo(spec);
     const name = match[3];
     let returnType = null;
+    let optional = false;
     for (const item of spec.children || []) {
-      if (item.type === 'li' && item.liType === 'default')
-        returnType = this.parseType(item);
+      if (item.type === 'li' && item.liType === 'default') {
+        const parsed = this.parseType(item, metainfo.since ?? 'v1.0');
+        returnType = parsed.type;
+        optional = parsed.optional;
+      }
     }
     if (!returnType)
-      returnType = new Documentation.Type('void');
+      returnType = new docs.Type('void');
 
+    const comments = extractComments(spec);
     let member;
     if (match[1] === 'event')
-      member = Documentation.Member.createEvent(extractLangs(spec), name, returnType, extractComments(spec));
+      member = docs.Member.createEvent(metainfo, name, returnType, comments);
     if (match[1] === 'property')
-      member = Documentation.Member.createProperty(extractLangs(spec), name, returnType, extractComments(spec));
-    if (match[1] === 'method' || match[1] === 'async method') {
-      member = Documentation.Member.createMethod(extractLangs(spec), name, [], returnType, extractComments(spec));
-      if (match[1] === 'async method')
+      member = docs.Member.createProperty(metainfo, name, returnType, comments, !optional);
+    if (['method', 'async method', 'optional method', 'optional async method'].includes(match[1])) {
+      member = docs.Member.createMethod(metainfo, name, [], returnType, comments);
+      if (match[1].includes('async'))
         member.async = true;
+      if (match[1].includes('optional'))
+        member.required = false;
     }
-    const clazz = this.classes.get(match[2]);
+    if (!member)
+      throw new Error('Unknown member: ' + spec.text);
+
+    const clazz = /** @type {docs.Class} */(this.classes.get(match[2]));
+    if (!clazz)
+      throw new Error(`Unknown class ${match[2]} for member: ` + spec.text);
+    if (metainfo.hidden)
+      return;
+
     const existingMember = clazz.membersArray.find(m => m.name === name && m.kind === member.kind);
     if (existingMember && isTypeOverride(existingMember, member)) {
-      for (const lang of member.langs.only) {
+      for (const lang of member?.langs?.only || []) {
         existingMember.langs.types = existingMember.langs.types || {};
         existingMember.langs.types[lang] = returnType;
       }
@@ -117,7 +140,7 @@ class ApiParser {
   }
 
   /**
-   * @param {MarkdownNode} spec
+   * @param {MarkdownHeaderNode} spec
    */
   parseArgument(spec) {
     const match = spec.text.match(/(param|option): (.*)/);
@@ -143,6 +166,8 @@ class ApiParser {
       throw new Error('Invalid member name ' + spec.text);
     if (match[1] === 'param') {
       const arg = this.parseProperty(spec);
+      if (!arg)
+        return;
       arg.name = name;
       const existingArg = method.argsArray.find(m => m.name === arg.name);
       if (existingArg && isTypeOverride(existingArg, arg)) {
@@ -156,48 +181,63 @@ class ApiParser {
         method.argsArray.push(arg);
       }
     } else {
+      // match[1] === 'option'
+      const p = this.parseProperty(spec);
+      if (!p)
+        return;
       let options = method.argsArray.find(o => o.name === 'options');
       if (!options) {
-        const type = new Documentation.Type('Object', []);
-        options = Documentation.Member.createProperty({}, 'options', type, undefined, false);
+        const type = new docs.Type('Object', []);
+        options = docs.Member.createProperty({ langs: {}, since: method.since, deprecated: undefined, discouraged: undefined }, 'options', type, undefined, false);
         method.argsArray.push(options);
       }
-      const p = this.parseProperty(spec);
       p.required = false;
+      // @ts-ignore
       options.type.properties.push(p);
     }
   }
 
   /**
-   * @param {MarkdownNode} spec
+   * @param {MarkdownHeaderNode} spec
+   * @returns {docs.Member | null}
    */
   parseProperty(spec) {
     const param = childrenWithoutProperties(spec)[0];
-    const text = param.text;
-    const name = text.substring(0, text.indexOf('<')).replace(/\`/g, '').trim();
+    const text = /** @type {string}*/(param.text);
+    let typeStart = text.indexOf('<');
+    while ('?e'.includes(text[typeStart - 1]))
+      typeStart--;
+    const name = text.substring(0, typeStart).replace(/\`/g, '').trim();
     const comments = extractComments(spec);
-    return Documentation.Member.createProperty(extractLangs(spec), name, this.parseType(param), comments, guessRequired(md.render(comments)));
+    const metainfo = extractMetainfo(spec);
+    if (metainfo.hidden)
+      return null;
+    const { type, optional } = this.parseType(/** @type {MarkdownLiNode} */(param), metainfo.since ?? 'v1.0');
+    return docs.Member.createProperty(metainfo, name, type, comments, !optional);
   }
 
   /**
-   * @param {MarkdownNode=} spec
-   * @return {Documentation.Type}
+   * @param {MarkdownLiNode} spec
+   * @param {string} since
+   * @return {{ type: docs.Type, optional: boolean }}
    */
-  parseType(spec) {
+  parseType(spec, since) {
     const arg = parseVariable(spec.text);
     const properties = [];
-    for (const child of spec.children || []) {
-      const { name, text } = parseVariable(child.text);
+    for (const child of /** @type {MarkdownLiNode[]} */ (spec.children) || []) {
+      const { name, text } = parseVariable(/** @type {string} */(child.text));
       const comments = /** @type {MarkdownNode[]} */ ([{ type: 'text', text }]);
-      properties.push(Documentation.Member.createProperty({}, name, this.parseType(child), comments, guessRequired(text)));
+      const childType = this.parseType(child, since);
+      properties.push(docs.Member.createProperty({ langs: {}, since, deprecated: undefined, discouraged: undefined }, name, childType.type, comments, !childType.optional));
     }
-    return Documentation.Type.parse(arg.type, properties);
+    const type = docs.Type.parse(arg.type, properties);
+    return { type, optional: arg.optional };
   }
 }
 
 /**
  * @param {string} line
- * @returns {{ name: string, type: string, text: string }}
+ * @returns {{ name: string, type: string, text: string, optional: boolean }}
  */
 function parseVariable(line) {
   let match = line.match(/^`([^`]+)` (.*)/);
@@ -210,7 +250,13 @@ function parseVariable(line) {
   if (!match)
     throw new Error('Invalid argument: ' + line);
   const name = match[1];
-  const remainder = match[2];
+  let remainder = match[2];
+  let optional = false;
+  while ('?'.includes(remainder[0])) {
+    if (remainder[0] === '?')
+      optional = true;
+    remainder = remainder.substring(1);
+  }
   if (!remainder.startsWith('<'))
     throw new Error(`Bad argument: "${name}" in "${line}"`);
   let depth = 0;
@@ -221,9 +267,9 @@ function parseVariable(line) {
     if (c === '>')
       --depth;
     if (depth === 0)
-      return { name, type: remainder.substring(1, i), text: remainder.substring(i + 2) };
+      return { name, type: remainder.substring(1, i), text: remainder.substring(i + 2), optional };
   }
-  throw new Error('Should not be reached');
+  throw new Error('Should not be reached, line: ' + line);
 }
 
 /**
@@ -247,11 +293,11 @@ function applyTemplates(body, params) {
         if (!template)
           throw new Error('Bad template: ' + prop.text);
         const children = childrenWithoutProperties(template);
-        const { name: argName } = parseVariable(children[0].text);
+        const { name: argName } = parseVariable(children[0].text || '');
         newChildren.push({
           type: node.type,
           text: name + argName,
-          children: template.children.map(c => md.clone(c))
+          children: [...node.children, ...template.children.map(c => md.clone(c))]
         });
       }
       const nodeIndex = parent.children.indexOf(node);
@@ -262,7 +308,20 @@ function applyTemplates(body, params) {
       const template = paramsMap.get(key);
       if (!template)
         throw new Error('Bad template: ' + key);
-      node.children.push(...template.children.map(c => md.clone(c)));
+      // Insert right after all metadata options like "* since",
+      // keeping any additional text like **Usage** below the template.
+      let index = node.children.findIndex(child => child.type !== 'li');
+      if (index === -1)
+        index = 0;
+      node.children.splice(index, 0, ...template.children.map(c => md.clone(c)));
+    } else if (node.text && node.text.includes('%%-template-')) {
+      node.text.replace(/%%-template-[^%]+-%%/, templateName => {
+        const template = paramsMap.get(templateName);
+        if (!template)
+          throw new Error('Bad template: ' + templateName);
+        const nodeIndex = parent.children.indexOf(node);
+        parent.children = [...parent.children.slice(0, nodeIndex), ...template.children, ...parent.children.slice(nodeIndex + 1)];
+      });
     }
     for (const child of node.children || [])
       visit(child, node);
@@ -277,39 +336,17 @@ function applyTemplates(body, params) {
 }
 
 /**
- * @param {MarkdownNode} item
+ * @param {MarkdownHeaderNode} item
  * @returns {MarkdownNode[]}
  */
 function extractComments(item) {
-  return (item.children || []).filter(c => {
+  return childrenWithoutProperties(item).filter(c => {
     if (c.type.startsWith('h'))
       return false;
     if (c.type === 'li' && c.liType === 'default')
       return false;
-    if (c.type === 'li' && c.text.startsWith('langs:'))
-      return false;
     return true;
   });
-}
-
-/**
- * @param {string} comment
- */
-function guessRequired(comment) {
-  let required = true;
-  if (comment.toLowerCase().includes('defaults to '))
-    required = false;
-  if (comment.startsWith('Optional'))
-    required = false;
-  if (comment.endsWith('Optional.'))
-    required = false;
-  if (comment.toLowerCase().includes('if set'))
-    required = false;
-  if (comment.toLowerCase().includes('if applicable'))
-    required = false;
-  if (comment.toLowerCase().includes('if available'))
-    required = false;
-  return required;
 }
 
 /**
@@ -321,11 +358,25 @@ function parseApi(apiDir, paramsPath) {
 }
 
 /**
+ * @param {MarkdownHeaderNode} spec
+ * @returns {import('./documentation').Metainfo & { hidden: boolean }}
+ */
+function extractMetainfo(spec) {
+  return {
+    langs: extractLangs(spec),
+    since: extractSince(spec),
+    deprecated: extractAttribute(spec, 'deprecated'),
+    discouraged: extractAttribute(spec, 'discouraged'),
+    hidden: extractHidden(spec),
+  };
+}
+
+/**
  * @param {MarkdownNode} spec
  * @returns {import('./documentation').Langs}
  */
 function extractLangs(spec) {
-  for (const child of spec.children) {
+  for (const child of spec.children || []) {
     if (child.type !== 'li' || child.liType !== 'bullet' || !child.text.startsWith('langs:'))
       continue;
 
@@ -333,7 +384,7 @@ function extractLangs(spec) {
     /** @type {Object<string, string>} */
     const aliases = {};
     for (const p of child.children || []) {
-      const match = p.text.match(/alias-(\w+)[\s]*:(.*)/);
+      const match = /** @type {string}*/(p.text).match(/alias-(\w+)[\s]*:(.*)/);
       if (match)
         aliases[match[1].trim()] = match[2].trim();
     }
@@ -348,27 +399,85 @@ function extractLangs(spec) {
 }
 
 /**
- * @param {MarkdownNode} spec
- * @returns {MarkdownNode[]}
+ * @param {MarkdownHeaderNode} spec
+ * @returns {string}
  */
-function childrenWithoutProperties(spec) {
-  return spec.children.filter(c => c.liType !== 'bullet' || !c.text.startsWith('langs'));
+function extractSince(spec) {
+  for (const child of spec.children) {
+    if (child.type !== 'li' || child.liType !== 'bullet' || !child.text.startsWith('since:'))
+      continue;
+    return child.text.substring(child.text.indexOf(':') + 1).trim();
+  }
+  console.error('Missing since: v1.** declaration in node:');
+  console.error(spec);
+  process.exit(1);
 }
 
 /**
- * @param {Documentation.Member} existingMember
- * @param {Documentation.Member} member
+ * @param {MarkdownHeaderNode} spec
+ * @returns {boolean}
+ */
+ function extractHidden(spec) {
+  for (const child of spec.children) {
+    if (child.type === 'li' && child.liType === 'bullet' && child.text === 'hidden')
+      return true;
+  }
+  return false;
+}
+
+/**
+ * @param {MarkdownHeaderNode} spec
+ * @param {string} name
+ * @returns {string | undefined}
+ */
+ function extractAttribute(spec, name) {
+  for (const child of spec.children) {
+    if (child.type !== 'li' || child.liType !== 'bullet' || !child.text.startsWith(name + ':'))
+      continue;
+    return child.text.substring(child.text.indexOf(':') + 1).trim() || undefined;
+  }
+}
+
+/**
+ * @param {MarkdownHeaderNode} spec
+ * @returns {MarkdownNode[]}
+ */
+function childrenWithoutProperties(spec) {
+  return (spec.children || []).filter(c => {
+    const isProperty = c.type === 'li' && c.liType === 'bullet' && (c.text.startsWith('langs:') || c.text.startsWith('since:') || c.text.startsWith('deprecated:') || c.text.startsWith('discouraged:') || c.text === 'hidden');
+    return !isProperty;
+  });
+}
+
+/**
+ * @param {docs.Member} existingMember
+ * @param {docs.Member} member
  * @returns {boolean}
  */
 function isTypeOverride(existingMember, member) {
-  if (!existingMember.langs.only)
+  if (!existingMember.langs.only || !member.langs.only)
     return true;
-  if (member.langs.only.every(l => existingMember.langs.only.includes(l))) {
+  const existingOnly = existingMember.langs.only;
+  if (member.langs.only.every(l => existingOnly.includes(l))) {
     return true;
-  } else if (member.langs.only.some(l => existingMember.langs.only.includes(l))) {
+  } else if (member.langs.only.some(l => existingOnly.includes(l))) {
     throw new Error(`Ambiguous language override for: ${member.name}`);
   }
   return false;
+}
+
+/**
+ * @param {MarkdownNode[]=} params
+ */
+function checkNoDuplicateParamEntries(params) {
+  if (!params)
+    return;
+  const entries = new Set();
+  for (const node of params) {
+    if (entries.has(node.text))
+      throw new Error('Duplicate param entry, for language-specific params use prefix (e.g. js-...): ' + node.text);
+    entries.add(node.text);
+  }
 }
 
 module.exports = { parseApi };

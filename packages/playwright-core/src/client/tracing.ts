@@ -14,68 +14,107 @@
  * limitations under the License.
  */
 
-import * as api from '../../types/types';
-import * as channels from '../protocol/channels';
+import type * as api from '../../types/types';
+import type * as channels from '@protocol/channels';
 import { Artifact } from './artifact';
-import { BrowserContext } from './browserContext';
+import { ChannelOwner } from './channelOwner';
 
-export class Tracing implements api.Tracing {
-  private _context: BrowserContext;
+export class Tracing extends ChannelOwner<channels.TracingChannel> implements api.Tracing {
+  private _includeSources = false;
+  _tracesDir: string | undefined;
+  private _stacksId: string | undefined;
+  private _isTracing = false;
 
-  constructor(channel: BrowserContext) {
-    this._context = channel;
+  static from(channel: channels.TracingChannel): Tracing {
+    return (channel as any)._object;
   }
 
-  async start(options: { name?: string, title?: string, snapshots?: boolean, screenshots?: boolean, sources?: boolean } = {}) {
-    await this._context._wrapApiCall(async () => {
-      await this._context._channel.tracingStart(options);
-      await this._context._channel.tracingStartChunk({ title: options.title });
-    });
+  constructor(parent: ChannelOwner, type: string, guid: string, initializer: channels.TracingInitializer) {
+    super(parent, type, guid, initializer);
   }
 
-  async startChunk(options: { title?: string } = {}) {
-    await this._context._channel.tracingStartChunk(options);
+  async start(options: { name?: string, title?: string, snapshots?: boolean, screenshots?: boolean, sources?: boolean, _live?: boolean } = {}) {
+    this._includeSources = !!options.sources;
+    const traceName = await this._wrapApiCall(async () => {
+      await this._channel.tracingStart({
+        name: options.name,
+        snapshots: options.snapshots,
+        screenshots: options.screenshots,
+        live: options._live,
+      });
+      const response = await this._channel.tracingStartChunk({ name: options.name, title: options.title });
+      return response.traceName;
+    }, true);
+    await this._startCollectingStacks(traceName);
+  }
+
+  async startChunk(options: { name?: string, title?: string } = {}) {
+    const { traceName } = await this._channel.tracingStartChunk(options);
+    await this._startCollectingStacks(traceName);
+  }
+
+  private async _startCollectingStacks(traceName: string) {
+    if (!this._isTracing) {
+      this._isTracing = true;
+      this._connection.setIsTracing(true);
+    }
+    const result = await this._connection.localUtils()._channel.tracingStarted({ tracesDir: this._tracesDir, traceName });
+    this._stacksId = result.stacksId;
   }
 
   async stopChunk(options: { path?: string } = {}) {
-    await this._doStopChunk(this._context._channel, options.path);
+    await this._wrapApiCall(async () => {
+      await this._doStopChunk(options.path);
+    }, true);
   }
 
   async stop(options: { path?: string } = {}) {
-    await this._context._wrapApiCall(async () => {
-      await this._doStopChunk(this._context._channel, options.path);
-      await this._context._channel.tracingStop();
-    });
+    await this._wrapApiCall(async () => {
+      await this._doStopChunk(options.path);
+      await this._channel.tracingStop();
+    }, true);
   }
 
-  private async _doStopChunk(channel: channels.BrowserContextChannel, filePath: string | undefined) {
-    const isLocal = !this._context._connection.isRemote();
+  private async _doStopChunk(filePath: string | undefined) {
+    this._resetStackCounter();
 
-    let mode: channels.BrowserContextTracingStopChunkParams['mode'] = 'doNotSave';
-    if (filePath) {
-      if (isLocal)
-        mode = 'compressTraceAndSources';
-      else
-        mode = 'compressTrace';
-    }
-
-    const result = await channel.tracingStopChunk({ mode });
     if (!filePath) {
       // Not interested in artifacts.
+      await this._channel.tracingStopChunk({ mode: 'discard' });
+      if (this._stacksId)
+        await this._connection.localUtils()._channel.traceDiscarded({ stacksId: this._stacksId });
       return;
     }
 
-    // The artifact may be missing if the browser closed while stopping tracing.
-    if (!result.artifact)
+    const isLocal = !this._connection.isRemote();
+
+    if (isLocal) {
+      const result = await this._channel.tracingStopChunk({ mode: 'entries' });
+      await this._connection.localUtils()._channel.zip({ zipFile: filePath, entries: result.entries!, mode: 'write', stacksId: this._stacksId, includeSources: this._includeSources });
       return;
+    }
+
+    const result = await this._channel.tracingStopChunk({ mode: 'archive' });
+
+    // The artifact may be missing if the browser closed while stopping tracing.
+    if (!result.artifact) {
+      if (this._stacksId)
+        await this._connection.localUtils()._channel.traceDiscarded({ stacksId: this._stacksId });
+      return;
+    }
 
     // Save trace to the final local file.
     const artifact = Artifact.from(result.artifact);
     await artifact.saveAs(filePath);
     await artifact.delete();
 
-    // Add local sources to the remote trace if necessary.
-    if (result.sourceEntries?.length)
-      await this._context._localUtils.zip(filePath, result.sourceEntries);
+    await this._connection.localUtils()._channel.zip({ zipFile: filePath, entries: [], mode: 'append', stacksId: this._stacksId, includeSources: this._includeSources });
+  }
+
+  _resetStackCounter() {
+    if (this._isTracing) {
+      this._isTracing = false;
+      this._connection.setIsTracing(false);
+    }
   }
 }

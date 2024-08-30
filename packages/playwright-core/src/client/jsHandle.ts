@@ -14,11 +14,12 @@
  * limitations under the License.
  */
 
-import * as channels from '../protocol/channels';
+import type * as channels from '@protocol/channels';
 import { ChannelOwner } from './channelOwner';
 import { parseSerializedValue, serializeValue } from '../protocol/serializers';
-import * as api from '../../types/types';
-import * as structs from '../../types/structs';
+import type * as api from '../../types/types';
+import type * as structs from '../../types/structs';
+import { isTargetClosedError } from './errors';
 
 export class JSHandle<T = any> extends ChannelOwner<channels.JSHandleChannel> implements api.JSHandle {
   private _preview: string;
@@ -63,8 +64,25 @@ export class JSHandle<T = any> extends ChannelOwner<channels.JSHandleChannel> im
     return null as any;
   }
 
+  async [Symbol.asyncDispose]() {
+    await this.dispose();
+  }
+
   async dispose() {
-    return await this._channel.dispose();
+    try {
+      await this._channel.dispose();
+    } catch (e) {
+      if (isTargetClosedError(e))
+        return;
+      throw e;
+    }
+  }
+
+  async _objectCount() {
+    return await this._wrapApiCall(async () => {
+      const { count } = await this._channel.objectCount();
+      return count;
+    });
   }
 
   override toString(): string {
@@ -84,7 +102,7 @@ export function serializeArgument(arg: any): channels.SerializedArgument {
     if (value instanceof JSHandle)
       return { h: pushHandle(value._channel) };
     return { fallThrough: value };
-  }, new Set());
+  });
   return { value, handles };
 }
 

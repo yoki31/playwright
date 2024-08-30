@@ -1,8 +1,6 @@
-$url = 'https://dl.google.com/tag/s/dl/chrome/install/beta/googlechromebetastandaloneenterprise.msi';
+$ErrorActionPreference = 'Stop'
 
-if ([Environment]::Is64BitProcess) {
-    $url = 'https://dl.google.com/tag/s/dl/chrome/install/beta/googlechromebetastandaloneenterprise64.msi'
-}
+$url = 'https://dl.google.com/tag/s/dl/chrome/install/beta/googlechromebetastandaloneenterprise64.msi'
 
 Write-Host "Downloading Google Chrome Beta"
 $wc = New-Object net.webclient
@@ -20,6 +18,7 @@ if (Test-Path "${env:ProgramFiles(x86)}$suffix") {
 } elseif (Test-Path "${env:ProgramFiles}$suffix") {
     (Get-Item "${env:ProgramFiles}$suffix").VersionInfo
 } else {
-    write-host "ERROR: failed to install Google Chrome Beta"
+    Write-Host "ERROR: Failed to install Google Chrome Beta."
+    Write-Host "ERROR: This could be due to insufficient privileges, in which case re-running as Administrator may help."
     exit 1
 }

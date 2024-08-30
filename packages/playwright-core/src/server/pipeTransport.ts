@@ -15,31 +15,42 @@
  * limitations under the License.
  */
 
-import { ConnectionTransport, ProtocolRequest, ProtocolResponse } from './transport';
-import { makeWaitForNextTask } from '../utils/utils';
+import type { ConnectionTransport, ProtocolRequest, ProtocolResponse } from './transport';
+import { makeWaitForNextTask } from '../utils';
 import { debugLogger } from '../utils/debugLogger';
 
 export class PipeTransport implements ConnectionTransport {
+  private _pipeRead: NodeJS.ReadableStream;
   private _pipeWrite: NodeJS.WritableStream;
-  private _pendingMessage = '';
+  private _pendingBuffers: Buffer[] = [];
   private _waitForNextTask = makeWaitForNextTask();
   private _closed = false;
+  private _onclose?: (reason?: string) => void;
 
   onmessage?: (message: ProtocolResponse) => void;
-  onclose?: () => void;
 
   constructor(pipeWrite: NodeJS.WritableStream, pipeRead: NodeJS.ReadableStream) {
+    this._pipeRead = pipeRead;
     this._pipeWrite = pipeWrite;
     pipeRead.on('data', buffer => this._dispatch(buffer));
     pipeRead.on('close', () => {
       this._closed = true;
-      if (this.onclose)
-        this.onclose.call(null);
+      if (this._onclose)
+        this._onclose.call(null);
     });
     pipeRead.on('error', e => debugLogger.log('error', e));
     pipeWrite.on('error', e => debugLogger.log('error', e));
     this.onmessage = undefined;
-    this.onclose = undefined;
+  }
+
+  get onclose() {
+    return this._onclose;
+  }
+
+  set onclose(onclose: undefined | ((reason?: string) => void)) {
+    this._onclose = onclose;
+    if (onclose && !this._pipeRead.readable)
+      onclose();
   }
 
   send(message: ProtocolRequest) {
@@ -56,10 +67,11 @@ export class PipeTransport implements ConnectionTransport {
   _dispatch(buffer: Buffer) {
     let end = buffer.indexOf('\0');
     if (end === -1) {
-      this._pendingMessage += buffer.toString();
+      this._pendingBuffers.push(buffer);
       return;
     }
-    const message = this._pendingMessage + buffer.toString(undefined, 0, end);
+    this._pendingBuffers.push(buffer.slice(0, end));
+    const message = Buffer.concat(this._pendingBuffers).toString();
     this._waitForNextTask(() => {
       if (this.onmessage)
         this.onmessage.call(null, JSON.parse(message));
@@ -76,6 +88,6 @@ export class PipeTransport implements ConnectionTransport {
       start = end + 1;
       end = buffer.indexOf('\0', start);
     }
-    this._pendingMessage = buffer.toString(undefined, start);
+    this._pendingBuffers = [buffer.slice(start)];
   }
 }

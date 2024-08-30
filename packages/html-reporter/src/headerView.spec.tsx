@@ -14,34 +14,30 @@
  * limitations under the License.
  */
 
-import React from 'react';
-import { test, expect } from '../test/componentTest';
+import { test, expect } from '@playwright/experimental-ct-react';
 import { HeaderView } from './headerView';
 
-test.use({ webpack: require.resolve('../webpack.config.js') });
 test.use({ viewport: { width: 720, height: 200 } });
 
-test('should render counters', async ({ render, capture }) => {
-  const component = await render(<HeaderView stats={{
+test('should render counters', async ({ mount }) => {
+  const component = await mount(<HeaderView stats={{
     total: 100,
     expected: 42,
     unexpected: 31,
     flaky: 17,
     skipped: 10,
     ok: false,
-    duration: 100000
-  }} filterText='' setFilterText={() => {}}></HeaderView>);
-  await expect(component.locator('a', { hasText: 'All' }).locator('.counter')).toHaveText('100');
+  }} filterText='' setFilterText={() => { }}></HeaderView>);
+  await expect(component.locator('a', { hasText: 'All' }).locator('.counter')).toHaveText('90');
   await expect(component.locator('a', { hasText: 'Passed' }).locator('.counter')).toHaveText('42');
   await expect(component.locator('a', { hasText: 'Failed' }).locator('.counter')).toHaveText('31');
   await expect(component.locator('a', { hasText: 'Flaky' }).locator('.counter')).toHaveText('17');
   await expect(component.locator('a', { hasText: 'Skipped' }).locator('.counter')).toHaveText('10');
-  await capture(component, 'counters');
 });
 
-test('should toggle filters', async ({ page, render: render }) => {
+test('should toggle filters', async ({ page, mount }) => {
   const filters: string[] = [];
-  const component = await render(<HeaderView
+  const component = await mount(<HeaderView
     stats={{
       total: 100,
       expected: 42,
@@ -49,10 +45,10 @@ test('should toggle filters', async ({ page, render: render }) => {
       flaky: 17,
       skipped: 10,
       ok: false,
-      duration: 100000
     }}
     filterText=''
-    setFilterText={(filterText: string) => filters.push(filterText)}>
+    setFilterText={(filterText: string) => filters.push(filterText)}
+  >
   </HeaderView>);
   await component.locator('a', { hasText: 'All' }).click();
   await component.locator('a', { hasText: 'Passed' }).click();
@@ -63,5 +59,6 @@ test('should toggle filters', async ({ page, render: render }) => {
   await expect(page).toHaveURL(/#\?q=s:flaky/);
   await component.locator('a', { hasText: 'Skipped' }).click();
   await expect(page).toHaveURL(/#\?q=s:skipped/);
-  expect(filters).toEqual(['', 's:passed', 's:failed', 's:flaky', 's:skipped']);
+  await component.getByRole('searchbox').fill('annot:annotation type=annotation description');
+  expect(filters).toEqual(['', 's:passed', 's:failed', 's:flaky', 's:skipped', 'annot:annotation type=annotation description']);
 });

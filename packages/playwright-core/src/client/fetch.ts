@@ -17,21 +17,22 @@
 import fs from 'fs';
 import path from 'path';
 import * as util from 'util';
-import { Serializable } from '../../types/structs';
-import * as api from '../../types/types';
-import { HeadersArray } from '../common/types';
-import * as channels from '../protocol/channels';
-import { kBrowserOrContextClosedError } from '../utils/errors';
-import { assert, headersObjectToArray, isFilePayload, isString, mkdirIfNeeded, objectToArray } from '../utils/utils';
+import type { Serializable } from '../../types/structs';
+import type * as api from '../../types/types';
+import type { HeadersArray, NameValue } from '../common/types';
+import type * as channels from '@protocol/channels';
+import { assert, headersObjectToArray, isString } from '../utils';
+import { mkdirIfNeeded } from '../utils/fileUtils';
 import { ChannelOwner } from './channelOwner';
-import * as network from './network';
 import { RawHeaders } from './network';
-import { FilePayload, Headers, StorageState } from './types';
-import { Playwright } from './playwright';
-import { createInstrumentation } from './clientInstrumentation';
+import type { ClientCertificate, FilePayload, Headers, StorageState } from './types';
+import type { Playwright } from './playwright';
+import { Tracing } from './tracing';
+import { TargetClosedError, isTargetClosedError } from './errors';
+import { toClientCertificatesProtocol } from './browserContext';
 
 export type FetchOptions = {
-  params?: { [key: string]: string; },
+  params?: { [key: string]: string | number | boolean; } | URLSearchParams | string,
   method?: string,
   headers?: Headers,
   data?: string | Buffer | Serializable,
@@ -40,114 +41,144 @@ export type FetchOptions = {
   timeout?: number,
   failOnStatusCode?: boolean,
   ignoreHTTPSErrors?: boolean,
+  maxRedirects?: number,
+  maxRetries?: number,
 };
 
-type NewContextOptions = Omit<channels.PlaywrightNewRequestOptions, 'extraHTTPHeaders' | 'storageState'> & {
+type NewContextOptions = Omit<channels.PlaywrightNewRequestOptions, 'extraHTTPHeaders' | 'clientCertificates' | 'storageState' | 'tracesDir'> & {
   extraHTTPHeaders?: Headers,
   storageState?: string | StorageState,
+  clientCertificates?: ClientCertificate[];
 };
 
 type RequestWithBodyOptions = Omit<FetchOptions, 'method'>;
-type RequestWithoutBodyOptions = Omit<RequestWithBodyOptions, 'data'|'form'|'multipart'>;
 
 export class APIRequest implements api.APIRequest {
   private _playwright: Playwright;
   readonly _contexts = new Set<APIRequestContext>();
 
   // Instrumentation.
-  _onDidCreateContext?: (context: APIRequestContext) => Promise<void>;
-  _onWillCloseContext?: (context: APIRequestContext) => Promise<void>;
+  _defaultContextOptions?: NewContextOptions & { tracesDir?: string };
 
   constructor(playwright: Playwright) {
     this._playwright = playwright;
   }
 
   async newContext(options: NewContextOptions = {}): Promise<APIRequestContext> {
+    options = { ...this._defaultContextOptions, ...options };
     const storageState = typeof options.storageState === 'string' ?
       JSON.parse(await fs.promises.readFile(options.storageState, 'utf8')) :
       options.storageState;
+    // We do not expose tracesDir in the API, so do not allow options to accidentally override it.
+    const tracesDir = this._defaultContextOptions?.tracesDir;
     const context = APIRequestContext.from((await this._playwright._channel.newRequest({
       ...options,
       extraHTTPHeaders: options.extraHTTPHeaders ? headersObjectToArray(options.extraHTTPHeaders) : undefined,
       storageState,
+      tracesDir,
+      clientCertificates: await toClientCertificatesProtocol(options.clientCertificates),
     })).request);
     this._contexts.add(context);
-    await this._onDidCreateContext?.(context);
+    context._request = this;
+    context._tracing._tracesDir = tracesDir;
+    await context._instrumentation.runAfterCreateRequestContext(context);
     return context;
   }
 }
 
 export class APIRequestContext extends ChannelOwner<channels.APIRequestContextChannel> implements api.APIRequestContext {
-  private _request?: APIRequest;
+  _request?: APIRequest;
+  readonly _tracing: Tracing;
+  private _closeReason: string | undefined;
 
   static from(channel: channels.APIRequestContextChannel): APIRequestContext {
     return (channel as any)._object;
   }
 
   constructor(parent: ChannelOwner, type: string, guid: string, initializer: channels.APIRequestContextInitializer) {
-    super(parent, type, guid, initializer, createInstrumentation());
-    if (parent instanceof APIRequest)
-      this._request = parent;
+    super(parent, type, guid, initializer);
+    this._tracing = Tracing.from(initializer.tracing);
   }
 
-  async dispose(): Promise<void> {
-    await this._request?._onWillCloseContext?.(this);
-    await this._channel.dispose();
+  async [Symbol.asyncDispose]() {
+    await this.dispose();
+  }
+
+  async dispose(options: { reason?: string } = {}): Promise<void> {
+    this._closeReason = options.reason;
+    await this._instrumentation.runBeforeCloseRequestContext(this);
+    try {
+      await this._channel.dispose(options);
+    } catch (e) {
+      if (isTargetClosedError(e))
+        return;
+      throw e;
+    }
+    this._tracing._resetStackCounter();
     this._request?._contexts.delete(this);
   }
 
   async delete(url: string, options?: RequestWithBodyOptions): Promise<APIResponse> {
-    return this.fetch(url, {
+    return await this.fetch(url, {
       ...options,
       method: 'DELETE',
     });
   }
 
-  async head(url: string, options?: RequestWithoutBodyOptions): Promise<APIResponse> {
-    return this.fetch(url, {
+  async head(url: string, options?: RequestWithBodyOptions): Promise<APIResponse> {
+    return await this.fetch(url, {
       ...options,
       method: 'HEAD',
     });
   }
 
-  async get(url: string, options?: RequestWithoutBodyOptions): Promise<APIResponse> {
-    return this.fetch(url, {
+  async get(url: string, options?: RequestWithBodyOptions): Promise<APIResponse> {
+    return await this.fetch(url, {
       ...options,
       method: 'GET',
     });
   }
 
   async patch(url: string, options?: RequestWithBodyOptions): Promise<APIResponse> {
-    return this.fetch(url, {
+    return await this.fetch(url, {
       ...options,
       method: 'PATCH',
     });
   }
 
   async post(url: string, options?: RequestWithBodyOptions): Promise<APIResponse> {
-    return this.fetch(url, {
+    return await this.fetch(url, {
       ...options,
       method: 'POST',
     });
   }
 
   async put(url: string, options?: RequestWithBodyOptions): Promise<APIResponse> {
-    return this.fetch(url, {
+    return await this.fetch(url, {
       ...options,
       method: 'PUT',
     });
   }
 
   async fetch(urlOrRequest: string | api.Request, options: FetchOptions = {}): Promise<APIResponse> {
-    return this._wrapApiCall(async () => {
-      const request: network.Request | undefined = (urlOrRequest instanceof network.Request) ? urlOrRequest as network.Request : undefined;
-      assert(request || typeof urlOrRequest === 'string', 'First argument must be either URL string or Request');
+    const url = isString(urlOrRequest) ? urlOrRequest : undefined;
+    const request = isString(urlOrRequest) ? undefined : urlOrRequest;
+    return await this._innerFetch({ url, request, ...options });
+  }
+
+  async _innerFetch(options: FetchOptions & { url?: string, request?: api.Request } = {}): Promise<APIResponse> {
+    return await this._wrapApiCall(async () => {
+      if (this._closeReason)
+        throw new TargetClosedError(this._closeReason);
+      assert(options.request || typeof options.url === 'string', 'First argument must be either URL string or Request');
       assert((options.data === undefined ? 0 : 1) + (options.form === undefined ? 0 : 1) + (options.multipart === undefined ? 0 : 1) <= 1, `Only one of 'data', 'form' or 'multipart' can be specified`);
-      const url = request ? request.url() : urlOrRequest as string;
-      const params = objectToArray(options.params);
-      const method = options.method || request?.method();
+      assert(options.maxRedirects === undefined || options.maxRedirects >= 0, `'maxRedirects' must be greater than or equal to '0'`);
+      assert(options.maxRetries === undefined || options.maxRetries >= 0, `'maxRetries' must be greater than or equal to '0'`);
+      const url = options.url !== undefined ? options.url : options.request!.url();
+      const params = mapParamsToArray(options.params);
+      const method = options.method || options.request?.method();
       // Cannot call allHeaders() here as the request may be paused inside route handler.
-      const headersObj = options.headers || request?.headers() ;
+      const headersObj = options.headers || options.request?.headers();
       const headers = headersObj ? headersObjectToArray(headersObj) : undefined;
       let jsonData: any;
       let formData: channels.NameValue[] | undefined;
@@ -156,13 +187,13 @@ export class APIRequestContext extends ChannelOwner<channels.APIRequestContextCh
       if (options.data !== undefined) {
         if (isString(options.data)) {
           if (isJsonContentType(headers))
-            jsonData = options.data;
+            jsonData = isJsonParsable(options.data) ? options.data : JSON.stringify(options.data);
           else
             postDataBuffer = Buffer.from(options.data, 'utf8');
         } else if (Buffer.isBuffer(options.data)) {
           postDataBuffer = options.data;
         } else if (typeof options.data === 'object' || typeof options.data === 'number' || typeof options.data === 'boolean') {
-          jsonData = options.data;
+          jsonData = JSON.stringify(options.data);
         } else {
           throw new Error(`Unexpected 'data' type`);
         }
@@ -170,35 +201,46 @@ export class APIRequestContext extends ChannelOwner<channels.APIRequestContextCh
         formData = objectToArray(options.form);
       } else if (options.multipart) {
         multipartData = [];
-        // Convert file-like values to ServerFilePayload structs.
-        for (const [name, value] of Object.entries(options.multipart)) {
-          if (isFilePayload(value)) {
-            const payload = value as FilePayload;
-            if (!Buffer.isBuffer(payload.buffer))
-              throw new Error(`Unexpected buffer type of 'data.${name}'`);
-            multipartData.push({ name, file: filePayloadToJson(payload) });
-          } else if (value instanceof fs.ReadStream) {
-            multipartData.push({ name, file: await readStreamToJson(value as fs.ReadStream) });
-          } else {
-            multipartData.push({ name, value: String(value) });
+        if (globalThis.FormData && options.multipart instanceof FormData) {
+          const form = options.multipart;
+          for (const [name, value] of form.entries()) {
+            if (isString(value)) {
+              multipartData.push({ name, value });
+            } else {
+              const file: ServerFilePayload = {
+                name: value.name,
+                mimeType: value.type,
+                buffer: Buffer.from(await value.arrayBuffer()),
+              };
+              multipartData.push({ name, file });
+            }
           }
+        } else {
+          // Convert file-like values to ServerFilePayload structs.
+          for (const [name, value] of Object.entries(options.multipart))
+            multipartData.push(await toFormField(name, value));
         }
       }
       if (postDataBuffer === undefined && jsonData === undefined && formData === undefined && multipartData === undefined)
-        postDataBuffer = request?.postDataBuffer() || undefined;
-      const postData = (postDataBuffer ? postDataBuffer.toString('base64') : undefined);
+        postDataBuffer = options.request?.postDataBuffer() || undefined;
+      const fixtures = {
+        __testHookLookup: (options as any).__testHookLookup
+      };
       const result = await this._channel.fetch({
         url,
         params,
         method,
         headers,
-        postData,
+        postData: postDataBuffer,
         jsonData,
         formData,
         multipartData,
         timeout: options.timeout,
         failOnStatusCode: options.failOnStatusCode,
         ignoreHTTPSErrors: options.ignoreHTTPSErrors,
+        maxRedirects: options.maxRedirects,
+        maxRetries: options.maxRetries,
+        ...fixtures
       });
       return new APIResponse(this, result.response);
     });
@@ -214,10 +256,37 @@ export class APIRequestContext extends ChannelOwner<channels.APIRequestContextCh
   }
 }
 
+async function toFormField(name: string, value: string|number|boolean|fs.ReadStream|FilePayload): Promise<channels.FormField> {
+  if (isFilePayload(value)) {
+    const payload = value as FilePayload;
+    if (!Buffer.isBuffer(payload.buffer))
+      throw new Error(`Unexpected buffer type of 'data.${name}'`);
+    return { name, file: filePayloadToJson(payload) };
+  } else if (value instanceof fs.ReadStream) {
+    return { name, file: await readStreamToJson(value as fs.ReadStream) };
+  } else {
+    return { name, value: String(value) };
+  }
+}
+
+function isJsonParsable(value: any) {
+  if (typeof value !== 'string')
+    return false;
+  try {
+    JSON.parse(value);
+    return true;
+  } catch (e) {
+    if (e instanceof SyntaxError)
+      return false;
+    else
+      throw e;
+  }
+}
+
 export class APIResponse implements api.APIResponse {
   private readonly _initializer: channels.APIResponse;
   private readonly _headers: RawHeaders;
-  private readonly _request: APIRequestContext;
+  readonly _request: APIRequestContext;
 
   constructor(context: APIRequestContext, initializer: channels.APIResponse) {
     this._request = context;
@@ -254,9 +323,9 @@ export class APIResponse implements api.APIResponse {
       const result = await this._request._channel.fetchResponseBody({ fetchUid: this._fetchUid() });
       if (result.binary === undefined)
         throw new Error('Response has been disposed');
-      return Buffer.from(result.binary!, 'base64');
+      return result.binary;
     } catch (e) {
-      if (e.message.includes(kBrowserOrContextClosedError))
+      if (isTargetClosedError(e))
         throw new Error('Response has been disposed');
       throw e;
     }
@@ -270,6 +339,10 @@ export class APIResponse implements api.APIResponse {
   async json(): Promise<object> {
     const content = await this.text();
     return JSON.parse(content);
+  }
+
+  async [Symbol.asyncDispose]() {
+    await this.dispose();
   }
 
   async dispose(): Promise<void> {
@@ -297,7 +370,7 @@ function filePayloadToJson(payload: FilePayload): ServerFilePayload {
   return {
     name: payload.name,
     mimeType: payload.mimeType,
-    buffer: payload.buffer.toString('base64'),
+    buffer: payload.buffer,
   };
 }
 
@@ -311,7 +384,7 @@ async function readStreamToJson(stream: fs.ReadStream): Promise<ServerFilePayloa
   const streamPath: string = Buffer.isBuffer(stream.path) ? stream.path.toString('utf8') : stream.path;
   return {
     name: path.basename(streamPath),
-    buffer: buffer.toString('base64'),
+    buffer,
   };
 }
 
@@ -323,4 +396,41 @@ function isJsonContentType(headers?: HeadersArray): boolean {
       return value === 'application/json';
   }
   return false;
+}
+
+function objectToArray(map?: { [key: string]: any }): NameValue[] | undefined {
+  if (!map)
+    return undefined;
+  const result = [];
+  for (const [name, value] of Object.entries(map))
+    result.push({ name, value: String(value) });
+  return result;
+}
+
+function queryStringToArray(queryString: string): NameValue[] | undefined {
+  const searchParams = new URLSearchParams(queryString);
+  return searchParamsToArray(searchParams);
+}
+
+function searchParamsToArray(searchParams: URLSearchParams): NameValue[] | undefined {
+  if (searchParams.size === 0)
+    return undefined;
+
+  const result: NameValue[] = [];
+  for (const [name, value] of searchParams.entries())
+    result.push({ name, value });
+  return result;
+}
+
+function mapParamsToArray(params: FetchOptions['params']): NameValue[] | undefined {
+  if (params instanceof URLSearchParams)
+    return searchParamsToArray(params);
+  if (typeof params === 'string')
+    return queryStringToArray(params);
+
+  return objectToArray(params);
+}
+
+function isFilePayload(value: any): boolean {
+  return typeof value === 'object' && value['name'] && value['mimeType'] && value['buffer'];
 }

@@ -15,7 +15,7 @@
  */
 
 import { Readable } from 'stream';
-import * as channels from '../protocol/channels';
+import type * as channels from '@protocol/channels';
 import { ChannelOwner } from './channelOwner';
 
 export class Stream extends ChannelOwner<channels.StreamChannel> {
@@ -40,10 +40,10 @@ class StreamImpl extends Readable {
     this._channel = channel;
   }
 
-  override async _read(size: number) {
-    const result = await this._channel.read({ size });
-    if (result.binary)
-      this.push(Buffer.from(result.binary, 'base64'));
+  override async _read() {
+    const result = await this._channel.read({ size: 1024 * 1024 });
+    if (result.binary.byteLength)
+      this.push(result.binary);
     else
       this.push(null);
   }

@@ -19,10 +19,11 @@ import { test, expect } from './playwright-test-fixtures';
 test('should check types of fixtures', async ({ runTSC }) => {
   const result = await runTSC({
     'helper.ts': `
+      import { test as base, expect, Page } from '@playwright/test';
       export type MyOptions = { foo: string, bar: number };
-      export const test = pwt.test.extend<{ foo: string }, { bar: number }>({
+      export const test = base.extend<{ foo: string }, { bar: number }>({
         foo: 'foo',
-        bar: [ 42, { scope: 'worker' } ],
+        bar: [ 42, { scope: 'worker', timeout: 123 } ],
       });
 
       const good1 = test.extend<{}>({ foo: async ({ bar }, run) => run('foo') });
@@ -35,7 +36,7 @@ test('should check types of fixtures', async ({ runTSC }) => {
         foo: async ({ baz }, run) => run('foo')
       });
       const good7 = test.extend<{ baz: boolean }>({
-        baz: [ false, { auto: true } ],
+        baz: [ false, { auto: true, timeout: 0 } ],
       });
       const good8 = test.extend<{ foo: string }>({
         foo: [ async ({}, use) => {
@@ -70,22 +71,28 @@ test('should check types of fixtures', async ({ runTSC }) => {
         // @ts-expect-error
         baz: true,
       });
-      const fail9 = test.extend<{ foo: string }>({
+      const fail9 = test.extend({
         foo: [ async ({}, use) => {
           await use('foo');
-        // @ts-expect-error
+          // @ts-expect-error
         }, { scope: 'test', auto: true } ],
       });
       const fail10 = test.extend<{}, {}>({
+        // @ts-expect-error
         bar: [ async ({}, use) => {
           await use(42);
-        // @ts-expect-error
         }, { scope: 'test' } ],
+      });
+      const fail11 = test.extend<{ yay: string }>({
+        // @ts-expect-error
+        yay: [ async ({}, use) => {
+          await use('foo');
+        }, { scope: 'test', timeout: 'str' } ],
       });
 
       type AssertNotAny<S> = {notRealProperty: number} extends S ? false : true;
       type AssertType<T, S> = S extends T ? AssertNotAny<S> : false;
-      const funcTest = pwt.test.extend<{ foo: (x: number, y: string) => Promise<string> }>({
+      const funcTest = base.extend<{ foo: (x: number, y: string) => Promise<string> }>({
         foo: async ({}, use) => {
           await use(async (x, y) => {
             const assertionX: AssertType<number, typeof x> = true;
@@ -93,18 +100,31 @@ test('should check types of fixtures', async ({ runTSC }) => {
             return y;
           });
         },
-      })
+      });
+
+      const chain1 = base.extend({
+        page: async ({ page }, use) => {
+          await use(page);
+        },
+      });
+      const chain2 = chain1.extend<{ pageAsUser: Page }>({
+        pageAsUser: async ({ page }, use) => {
+          // @ts-expect-error
+          const x: number = page;
+          // @ts-expect-error
+          await use(x);
+        },
+      });
     `,
     'playwright.config.ts': `
       import { MyOptions } from './helper';
-      const configs1: pwt.Config[] = [];
+      import { Config } from '@playwright/test';
+      const configs1: Config[] = [];
       configs1.push({ use: { foo: '42', bar: 42 } });
       configs1.push({ use: { foo: '42', bar: 42 }, timeout: 100 });
 
-      const configs2: pwt.Config<MyOptions>[] = [];
+      const configs2: Config<MyOptions>[] = [];
       configs2.push({ use: { foo: '42', bar: 42 } });
-      // @ts-expect-error
-      pwt.runTests({ use: { foo: '42', bar: 42 } }, {});
       // @ts-expect-error
       configs2.push({ use: { bar: '42' } });
       // @ts-expect-error
@@ -160,7 +180,128 @@ test('should check types of fixtures', async ({ runTSC }) => {
       test.afterAll(async ({ a }) => {});
       test.afterAll(async ({ foo, bar }) => {});
       test.afterAll(() => {});
-    `
+    `,
+    'playwright-props.config.ts': `
+      import { PlaywrightTestConfig } from '@playwright/test';
+      const config0: PlaywrightTestConfig = {
+        use: {
+          ignoreHTTPSErrors: undefined,
+          isMobile: true,
+          javaScriptEnabled: false,
+        },
+      };
+
+      const config1: PlaywrightTestConfig = {
+        use: {
+          ignoreHTTPSErrors: undefined,
+          isMobile: true,
+          javaScriptEnabled: false,
+          // @ts-expect-error
+          hasTouch: 'foo',
+        },
+      };
+
+      const config2: PlaywrightTestConfig = {
+        use: {
+          ignoreHTTPSErrors: undefined,
+          isMobile: true,
+          javaScriptEnabled: false,
+          // @ts-expect-error
+          foo: true,
+        },
+      };
+
+      const config3: PlaywrightTestConfig<{ foo: boolean }> = {
+        use: {
+          ignoreHTTPSErrors: undefined,
+          isMobile: true,
+          javaScriptEnabled: false,
+          foo: true,
+        },
+      };
+
+      const config4: PlaywrightTestConfig<{ foo: boolean }> = {
+        use: {
+          ignoreHTTPSErrors: undefined,
+          isMobile: true,
+          javaScriptEnabled: false,
+          foo: true,
+          // @ts-expect-error
+          hasTouch: 'foo',
+        },
+      };
+    `,
+
+    'playwright-define.config.ts': `
+      import { defineConfig } from '@playwright/test';
+      const config0 = defineConfig({
+        use: {
+          ignoreHTTPSErrors: undefined,
+          isMobile: true,
+          javaScriptEnabled: false,
+        },
+      });
+
+      const config1 = defineConfig({
+        use: {
+          ignoreHTTPSErrors: undefined,
+          isMobile: true,
+          javaScriptEnabled: false,
+          // @ts-expect-error
+          hasTouch: 'foo',
+        },
+      });
+
+      const config2 = defineConfig({
+        use: {
+          ignoreHTTPSErrors: undefined,
+          isMobile: true,
+          javaScriptEnabled: false,
+          // @ts-expect-error
+          foo: true,
+        },
+      });
+
+      const config3 = defineConfig<{ foo: boolean }>({
+        use: {
+          ignoreHTTPSErrors: undefined,
+          isMobile: true,
+          javaScriptEnabled: false,
+          foo: true,
+        },
+      });
+
+      const config4 = defineConfig<{ foo: boolean }>({
+        use: {
+          ignoreHTTPSErrors: undefined,
+          isMobile: true,
+          javaScriptEnabled: false,
+          foo: true,
+          // @ts-expect-error
+          hasTouch: 'foo',
+        },
+      });
+    `,
+    'playwright-define-merge.config.ts': `
+      import { defineConfig } from '@playwright/test';
+      const config0 = defineConfig({
+        timeout: 1,
+        // @ts-expect-error
+        grep: 23,
+      }, {
+        timeout: 2,
+      });
+    `,
+    'playwright-define-merge-ct.config.ts': `
+      import { defineConfig } from '@playwright/experimental-ct-vue';
+      const config0 = defineConfig({
+        timeout: 1,
+        // @ts-expect-error
+        grep: 23,
+      }, {
+        timeout: 2,
+      });
+    `,
   });
   expect(result.exitCode).toBe(0);
 });
@@ -168,14 +309,15 @@ test('should check types of fixtures', async ({ runTSC }) => {
 test('config should allow void/empty options', async ({ runTSC }) => {
   const result = await runTSC({
     'playwright.config.ts': `
-      const configs: pwt.Config[] = [];
+      import { Config } from '@playwright/test';
+      const configs: Config[] = [];
       configs.push({});
       configs.push({ timeout: 100 });
       configs.push();
       configs.push({ use: { foo: 42 }});
     `,
     'a.spec.ts': `
-      const { test } = pwt;
+      import { test, expect } from '@playwright/test';
       test('my test', async () => {
       });
     `

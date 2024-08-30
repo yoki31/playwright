@@ -35,8 +35,13 @@ export const Events = {
   },
 
   BrowserContext: {
+    Console: 'console',
     Close: 'close',
+    Dialog: 'dialog',
     Page: 'page',
+    // Can't use just 'error' due to node.js special treatment of error events.
+    // @see https://nodejs.org/api/events.html#events_error_events
+    WebError: 'weberror',
     BackgroundPage: 'backgroundpage',
     ServiceWorker: 'serviceworker',
     Request: 'request',
@@ -86,6 +91,7 @@ export const Events = {
 
   ElectronApplication: {
     Close: 'close',
+    Console: 'console',
     Window: 'window',
   },
 };

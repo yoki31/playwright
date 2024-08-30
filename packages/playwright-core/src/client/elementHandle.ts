@@ -14,17 +14,25 @@
  * limitations under the License.
  */
 
-import * as channels from '../protocol/channels';
+import type * as channels from '@protocol/channels';
 import { Frame } from './frame';
+import type { Locator } from './locator';
 import { JSHandle, serializeArgument, parseResult } from './jsHandle';
-import { ChannelOwner } from './channelOwner';
-import { SelectOption, FilePayload, Rect, SelectOptionOptions } from './types';
+import type { ChannelOwner } from './channelOwner';
+import type { SelectOption, FilePayload, Rect, SelectOptionOptions } from './types';
 import fs from 'fs';
-import * as mime from 'mime';
+import { mime } from '../utilsBundle';
 import path from 'path';
-import { assert, isString, mkdirIfNeeded } from '../utils/utils';
-import * as api from '../../types/types';
-import * as structs from '../../types/structs';
+import { assert, isString } from '../utils';
+import { fileUploadSizeLimit, mkdirIfNeeded } from '../utils/fileUtils';
+import type * as api from '../../types/types';
+import type * as structs from '../../types/structs';
+import type { BrowserContext } from './browserContext';
+import { WritableStream } from './writableStream';
+import { pipeline } from 'stream';
+import { promisify } from 'util';
+
+const pipelineAsync = promisify(pipeline);
 
 export class ElementHandle<T extends Node = Node> extends JSHandle<T> implements api.ElementHandle {
   readonly _elementChannel: channels.ElementHandleChannel;
@@ -138,7 +146,11 @@ export class ElementHandle<T extends Node = Node> extends JSHandle<T> implements
   }
 
   async setInputFiles(files: string | FilePayload | string[] | FilePayload[], options: channels.ElementHandleSetInputFilesOptions = {}) {
-    await this._elementChannel.setInputFiles({ files: await convertInputFiles(files), ...options });
+    const frame = await this.ownerFrame();
+    if (!frame)
+      throw new Error('Cannot set input files to detached element');
+    const converted = await convertInputFiles(files, frame.page().context());
+    await this._elementChannel.setInputFiles({ ...converted, ...options });
   }
 
   async focus(): Promise<void> {
@@ -173,17 +185,22 @@ export class ElementHandle<T extends Node = Node> extends JSHandle<T> implements
     return value === undefined ? null : value;
   }
 
-  async screenshot(options: channels.ElementHandleScreenshotOptions & { path?: string } = {}): Promise<Buffer> {
-    const copy = { ...options };
+  async screenshot(options: Omit<channels.ElementHandleScreenshotOptions, 'mask'> & { path?: string, mask?: Locator[] } = {}): Promise<Buffer> {
+    const copy: channels.ElementHandleScreenshotOptions = { ...options, mask: undefined };
     if (!copy.type)
       copy.type = determineScreenshotType(options);
+    if (options.mask) {
+      copy.mask = options.mask.map(locator => ({
+        frame: locator._frame._channel,
+        selector: locator._selector,
+      }));
+    }
     const result = await this._elementChannel.screenshot(copy);
-    const buffer = Buffer.from(result.binary, 'base64');
     if (options.path) {
       await mkdirIfNeeded(options.path);
-      await fs.promises.writeFile(options.path, buffer);
+      await fs.promises.writeFile(options.path, result.binary);
     }
-    return buffer;
+    return result.binary;
   }
 
   async $(selector: string): Promise<ElementHandle<SVGElement | HTMLElement> | null> {
@@ -221,7 +238,7 @@ export function convertSelectOptionValues(values: string | api.ElementHandle | S
   if (values === null)
     return {};
   if (!Array.isArray(values))
-    values = [ values as any ];
+    values = [values as any];
   if (!values.length)
     return {};
   for (let i = 0; i < values.length; i++)
@@ -229,28 +246,75 @@ export function convertSelectOptionValues(values: string | api.ElementHandle | S
   if (values[0] instanceof ElementHandle)
     return { elements: (values as ElementHandle[]).map((v: ElementHandle) => v._elementChannel) };
   if (isString(values[0]))
-    return { options: (values as string[]).map(value => ({ value })) };
+    return { options: (values as string[]).map(valueOrLabel => ({ valueOrLabel })) };
   return { options: values as SelectOption[] };
 }
 
-type SetInputFilesFiles = channels.ElementHandleSetInputFilesParams['files'];
-export async function convertInputFiles(files: string | FilePayload | string[] | FilePayload[]): Promise<SetInputFilesFiles> {
-  const items: (string | FilePayload)[] = Array.isArray(files) ? files : [ files ];
-  const filePayloads: SetInputFilesFiles = await Promise.all(items.map(async item => {
-    if (typeof item === 'string') {
-      return {
-        name: path.basename(item),
-        buffer: (await fs.promises.readFile(item)).toString('base64')
-      };
+type SetInputFilesFiles = Pick<channels.ElementHandleSetInputFilesParams, 'payloads' | 'localPaths' | 'localDirectory' | 'streams' | 'directoryStream'>;
+
+function filePayloadExceedsSizeLimit(payloads: FilePayload[]) {
+  return payloads.reduce((size, item) => size + (item.buffer ? item.buffer.byteLength : 0), 0) >= fileUploadSizeLimit;
+}
+
+async function resolvePathsAndDirectoryForInputFiles(items: string[]): Promise<[string[] | undefined, string | undefined]> {
+  let localPaths: string[] | undefined;
+  let localDirectory: string | undefined;
+  for (const item of items) {
+    const stat = await fs.promises.stat(item as string);
+    if (stat.isDirectory()) {
+      if (localDirectory)
+        throw new Error('Multiple directories are not supported');
+      localDirectory = path.resolve(item as string);
     } else {
+      localPaths ??= [];
+      localPaths.push(path.resolve(item as string));
+    }
+  }
+  if (localPaths?.length && localDirectory)
+    throw new Error('File paths must be all files or a single directory');
+  return [localPaths, localDirectory];
+}
+
+export async function convertInputFiles(files: string | FilePayload | string[] | FilePayload[], context: BrowserContext): Promise<SetInputFilesFiles> {
+  const items: (string | FilePayload)[] = Array.isArray(files) ? files.slice() : [files];
+
+  if (items.some(item => typeof item === 'string')) {
+    if (!items.every(item => typeof item === 'string'))
+      throw new Error('File paths cannot be mixed with buffers');
+
+    const [localPaths, localDirectory] = await resolvePathsAndDirectoryForInputFiles(items);
+
+    if (context._connection.isRemote()) {
+      const files = localDirectory ? (await fs.promises.readdir(localDirectory, { withFileTypes: true, recursive: true })).filter(f => f.isFile()).map(f => path.join(f.path, f.name)) : localPaths!;
+      const { writableStreams, rootDir } = await context._wrapApiCall(async () => context._channel.createTempFiles({
+        rootDirName: localDirectory ? path.basename(localDirectory) : undefined,
+        items: await Promise.all(files.map(async file => {
+          const lastModifiedMs = (await fs.promises.stat(file)).mtimeMs;
+          return {
+            name: localDirectory ? path.relative(localDirectory, file) : path.basename(file),
+            lastModifiedMs
+          };
+        })),
+      }), true);
+      for (let i = 0; i < files.length; i++) {
+        const writable = WritableStream.from(writableStreams[i]);
+        await pipelineAsync(fs.createReadStream(files[i]), writable.stream());
+      }
       return {
-        name: item.name,
-        mimeType: item.mimeType,
-        buffer: item.buffer.toString('base64'),
+        directoryStream: rootDir,
+        streams: localDirectory ? undefined : writableStreams,
       };
     }
-  }));
-  return filePayloads;
+    return {
+      localPaths,
+      localDirectory,
+    };
+  }
+
+  const payloads = items as FilePayload[];
+  if (filePayloadExceedsSizeLimit(payloads))
+    throw new Error('Cannot set buffer larger than 50Mb, please write it to a file and pass its path instead.');
+  return { payloads };
 }
 
 export function determineScreenshotType(options: { path?: string, type?: 'png' | 'jpeg' }): 'png' | 'jpeg' | undefined {

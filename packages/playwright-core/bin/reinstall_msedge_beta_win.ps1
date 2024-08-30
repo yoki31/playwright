@@ -1,3 +1,4 @@
+$ErrorActionPreference = 'Stop'
 $url = $args[0]
 
 Write-Host "Downloading Microsoft Edge Beta"
@@ -16,6 +17,7 @@ if (Test-Path "${env:ProgramFiles(x86)}$suffix") {
 } elseif (Test-Path "${env:ProgramFiles}$suffix") {
     (Get-Item "${env:ProgramFiles}$suffix").VersionInfo
 } else {
-    write-host "ERROR: failed to install Microsoft Edge"
+    Write-Host "ERROR: Failed to install Microsoft Edge Beta."
+    Write-Host "ERROR: This could be due to insufficient privileges, in which case re-running as Administrator may help."
     exit 1
 }

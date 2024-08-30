@@ -16,7 +16,7 @@
 
 import { test as it, expect } from './pageTest';
 
-it('should dispatch click event #smoke', async ({ page, server }) => {
+it('should dispatch click event @smoke', async ({ page, server }) => {
   await page.goto(server.PREFIX + '/input/button.html');
   await page.dispatchEvent('button', 'click');
   expect(await page.evaluate(() => window['result'])).toBe('Clicked');
@@ -92,7 +92,7 @@ it('should dispatch click when node is added in shadow dom', async ({ page, serv
     div.attachShadow({ mode: 'open' });
     document.body.appendChild(div);
   });
-  await page.evaluate(() => new Promise(f => setTimeout(f, 100)));
+  await page.waitForTimeout(100);
   await page.evaluate(() => {
     const span = document.createElement('span');
     span.textContent = 'Hello from shadow';
@@ -108,13 +108,13 @@ it('should be atomic', async ({ playwright, page }) => {
     query(root, selector) {
       const result = root.querySelector(selector);
       if (result)
-        Promise.resolve().then(() => result.onclick = '');
+        void Promise.resolve().then(() => result.onclick = '');
       return result;
     },
     queryAll(root: HTMLElement, selector: string) {
       const result = Array.from(root.querySelectorAll(selector));
       for (const e of result)
-        Promise.resolve().then(() => (e as HTMLElement).onclick = null);
+        void Promise.resolve().then(() => (e as HTMLElement).onclick = null);
       return result;
     }
   });
@@ -153,4 +153,79 @@ it('should dispatch click event via ElementHandles', async ({ page, server }) =>
   const button = await page.$('button');
   await button.dispatchEvent('click');
   expect(await page.evaluate(() => window['result'])).toBe('Clicked');
+});
+
+it('should dispatch wheel event', async ({ page, server }) => {
+  it.info().annotations.push({ type: 'issue', description: 'https://github.com/microsoft/playwright/issues/15562' });
+  await page.goto(server.PREFIX + '/input/scrollable.html');
+  const eventsHandle = await page.locator('body').evaluateHandle(e => {
+    const events = [];
+    e.addEventListener('wheel', event => {
+      events.push(event);
+      console.log(event);
+    });
+    return events;
+  });
+  await page.locator('body').dispatchEvent('wheel', { deltaX: 100, deltaY: 200 });
+  expect(await eventsHandle.evaluate(e => e.length)).toBe(1);
+  expect(await eventsHandle.evaluate(e => e[0] instanceof WheelEvent)).toBeTruthy();
+  expect(await eventsHandle.evaluate(e => ({ deltaX: e[0].deltaX, deltaY: e[0].deltaY }))).toEqual({ deltaX: 100, deltaY: 200 });
+});
+
+it('should dispatch device orientation event', async ({ page, server, isAndroid }) => {
+  it.skip(isAndroid, 'DeviceOrientationEvent is only available in a secure context. While Androids loopback is not treated as secure.');
+  await page.goto(server.PREFIX + '/device-orientation.html');
+  await page.locator('html').dispatchEvent('deviceorientation', { alpha: 10, beta: 20, gamma: 30 });
+  expect(await page.evaluate('result')).toBe('Oriented');
+  expect(await page.evaluate('alpha')).toBe(10);
+  expect(await page.evaluate('beta')).toBe(20);
+  expect(await page.evaluate('gamma')).toBe(30);
+  expect(await page.evaluate('absolute')).toBeFalsy();
+});
+
+it('should dispatch absolute device orientation event', async ({ page, server, isAndroid }) => {
+  it.skip(isAndroid, 'DeviceOrientationEvent is only available in a secure context. While Androids loopback is not treated as secure.');
+  await page.goto(server.PREFIX + '/device-orientation.html');
+  await page.locator('html').dispatchEvent('deviceorientationabsolute', { alpha: 10, beta: 20, gamma: 30, absolute: true });
+  expect(await page.evaluate('result')).toBe('Oriented');
+  expect(await page.evaluate('alpha')).toBe(10);
+  expect(await page.evaluate('beta')).toBe(20);
+  expect(await page.evaluate('gamma')).toBe(30);
+  expect(await page.evaluate('absolute')).toBeTruthy();
+});
+
+it('should dispatch device motion event', async ({ page, server, isAndroid }) => {
+  it.skip(isAndroid, 'DeviceOrientationEvent is only available in a secure context. While Androids loopback is not treated as secure.');
+  await page.goto(server.PREFIX + '/device-motion.html');
+  await page.locator('html').dispatchEvent('devicemotion', {
+    acceleration: { x: 10, y: 20, z: 30 },
+    accelerationIncludingGravity: { x: 15, y: 25, z: 35 },
+    rotationRate: { alpha: 5, beta: 10, gamma: 15 },
+    interval: 16,
+  });
+  expect(await page.evaluate('result')).toBe('Moved');
+  expect(await page.evaluate('acceleration.x')).toBe(10);
+  expect(await page.evaluate('acceleration.y')).toBe(20);
+  expect(await page.evaluate('acceleration.z')).toBe(30);
+  expect(await page.evaluate('accelerationIncludingGravity.x')).toBe(15);
+  expect(await page.evaluate('accelerationIncludingGravity.y')).toBe(25);
+  expect(await page.evaluate('accelerationIncludingGravity.z')).toBe(35);
+  expect(await page.evaluate('rotationRate.alpha')).toBe(5);
+  expect(await page.evaluate('rotationRate.beta')).toBe(10);
+  expect(await page.evaluate('rotationRate.gamma')).toBe(15);
+  expect(await page.evaluate('interval')).toBe(16);
+});
+
+it('should throw if argument is from different frame', async ({ page, server }) => {
+  it.info().annotations.push({ type: 'issue', description: 'https://github.com/microsoft/playwright/issues/28690' });
+  await page.goto(server.PREFIX + '/frames/one-frame.html');
+  {
+    const dataTransfer = await page.frames()[1].evaluateHandle(() => new DataTransfer());
+    await page.frameLocator('iframe').locator('div').dispatchEvent('drop', { dataTransfer });
+  }
+  {
+    const dataTransfer = await page.evaluateHandle(() => new DataTransfer());
+    await expect(page.frameLocator('iframe').locator('div').dispatchEvent('drop', { dataTransfer }))
+        .rejects.toThrow('JSHandles can be evaluated only in the context they were created!');
+  }
 });

@@ -34,6 +34,7 @@
 #include <WebKit/WKCredential.h>
 #include <WebKit/WKFramePolicyListener.h>
 #include <WebKit/WKInspector.h>
+#include <WebKit/WKPagePrivate.h>
 #include <WebKit/WKProtectionSpace.h>
 #include <WebKit/WKProtectionSpaceCurl.h>
 #include <WebKit/WKWebsiteDataStoreRef.h>
@@ -99,8 +100,11 @@ WebKitBrowserWindow::WebKitBrowserWindow(BrowserWindowClient& client, HWND mainW
     WKPagePolicyClientV1 policyClient = { };
     policyClient.base.version = 1;
     policyClient.base.clientInfo = this;
-    policyClient.decidePolicyForResponse_deprecatedForUseWithV0 = decidePolicyForResponse;
+    policyClient.decidePolicyForResponse = decidePolicyForResponse;
+    policyClient.decidePolicyForNavigationAction = decidePolicyForNavigationAction;
     WKPageSetPagePolicyClient(page, &policyClient.base);
+
+    WKPageSetControlledByAutomation(page, true);
     resetZoom();
 }
 
@@ -384,9 +388,24 @@ void WebKitBrowserWindow::didNotHandleKeyEvent(WKPageRef, WKNativeEventPtr event
     PostMessage(thisWindow.m_hMainWnd, event->message, event->wParam, event->lParam);
 }
 
-void WebKitBrowserWindow::decidePolicyForResponse(WKPageRef page, WKFrameRef frame, WKURLResponseRef response, WKURLRequestRef request, WKFramePolicyListenerRef listener, WKTypeRef userData, const void* clientInfo)
+void WebKitBrowserWindow::decidePolicyForNavigationAction(WKPageRef page, WKFrameRef frame, WKFrameNavigationType navigationType, WKEventModifiers modifiers, WKEventMouseButton mouseButton, WKFrameRef originatingFrame, WKURLRequestRef request, WKFramePolicyListenerRef listener, WKTypeRef userData, const void* clientInfo)
 {
-    if (WKURLResponseIsAttachment(response))
+    WebKitBrowserWindow* browserWindow = reinterpret_cast<WebKitBrowserWindow*>(const_cast<void*>(clientInfo));
+    if (navigationType == kWKFrameNavigationTypeLinkClicked &&
+        mouseButton == kWKEventMouseButtonLeftButton &&
+        (modifiers & (kWKEventModifiersShiftKey | kWKEventModifiersControlKey)) != 0) {
+        WKRetainPtr<WKPageRef> newPage = createViewCallback(WKPageCopyPageConfiguration(page), false);
+        WKPageLoadURLRequest(newPage.get(), request);
+        WKFramePolicyListenerIgnore(listener);
+        return;
+    }
+    WKFramePolicyListenerUse(listener);
+}
+
+void WebKitBrowserWindow::decidePolicyForResponse(WKPageRef page, WKFrameRef frame, WKURLResponseRef response, WKURLRequestRef request, bool canShowMIMEType, WKFramePolicyListenerRef listener, WKTypeRef userData, const void* clientInfo)
+{
+    // Safari renders resources without content-type as text.
+    if (WKURLResponseIsAttachment(response) || (!WKStringIsEmpty(WKURLResponseCopyMIMEType(response)) && !canShowMIMEType))
         WKFramePolicyListenerDownload(listener);
     else
         WKFramePolicyListenerUse(listener);

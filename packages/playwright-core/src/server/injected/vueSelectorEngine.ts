@@ -14,9 +14,10 @@
  * limitations under the License.
  */
 
-import { SelectorEngine, SelectorRoot } from './selectorEngine';
-import { isInsideScope } from './selectorEvaluator';
-import { checkComponentAttribute, parseComponentSelector } from '../common/componentUtils';
+import type { SelectorEngine, SelectorRoot } from './selectorEngine';
+import { isInsideScope } from './domUtils';
+import { matchesComponentAttribute } from './selectorUtils';
+import { parseAttributeSelector } from '../../utils/isomorphic/selectorParser';
 
 type ComponentNode = {
   name: string,
@@ -85,12 +86,18 @@ function buildComponentsTreeVue3(instance: VueVNode): ComponentNode {
   // @see https://github.com/vuejs/devtools/blob/e7132f3392b975e39e1d9a23cf30456c270099c2/packages/app-backend-vue3/src/components/util.ts#L29
   function getInstanceName(instance: VueVNode): string {
     const name = getComponentTypeName(instance.type || {});
-    if (name) return name;
-    if (instance.root === instance) return 'Root';
-    for (const key in instance.parent?.type?.components)
-      if (instance.parent?.type.components[key] === instance.type) return saveComponentName(instance, key);
-    for (const key in instance.appContext?.components)
-      if (instance.appContext.components[key] === instance.type) return saveComponentName(instance, key);
+    if (name)
+      return name;
+    if (instance.root === instance)
+      return 'Root';
+    for (const key in instance.parent?.type?.components) {
+      if (instance.parent?.type.components[key] === instance.type)
+        return saveComponentName(instance, key);
+    }
+    for (const key in instance.appContext?.components) {
+      if (instance.appContext.components[key] === instance.type)
+        return saveComponentName(instance, key);
+    }
     return 'Anonymous Component';
   }
 
@@ -131,7 +138,8 @@ function buildComponentsTreeVue3(instance: VueVNode): ComponentNode {
 
   // @see https://github.com/vuejs/devtools/blob/e7132f3392b975e39e1d9a23cf30456c270099c2/packages/app-backend-vue3/src/components/el.ts#L15
   function getFragmentRootElements(vnode: any): Element[] {
-    if (!vnode.children) return [];
+    if (!vnode.children)
+      return [];
 
     const list = [];
 
@@ -207,6 +215,7 @@ function filterComponentsTree(treeNode: ComponentNode, searchFn: (node: Componen
 
 type VueRoot = {version: number, root: VueVNode};
 function findVueRoots(root: Document | ShadowRoot, roots: VueRoot[] = []): VueRoot[] {
+  const document = root.ownerDocument || root;
   const walker = document.createTreeWalker(root, NodeFilter.SHOW_ELEMENT);
   // Vue2 roots are referred to from elements.
   const vue2Roots: Set<VueVNode> = new Set();
@@ -232,7 +241,8 @@ function findVueRoots(root: Document | ShadowRoot, roots: VueRoot[] = []): VueRo
 
 export const VueEngine: SelectorEngine = {
   queryAll(scope: SelectorRoot, selector: string): Element[] {
-    const { name, attributes } = parseComponentSelector(selector);
+    const document = scope.ownerDocument || scope;
+    const { name, attributes } = parseAttributeSelector(selector, false);
     const vueRoots = findVueRoots(document);
     const trees = vueRoots.map(vueRoot => vueRoot.version === 3 ? buildComponentsTreeVue3(vueRoot.root) : buildComponentsTreeVue2(vueRoot.root));
     const treeNodes = trees.map(tree => filterComponentsTree(tree, treeNode => {
@@ -241,7 +251,7 @@ export const VueEngine: SelectorEngine = {
       if (treeNode.rootElements.some(rootElement => !isInsideScope(scope, rootElement)))
         return false;
       for (const attr of attributes) {
-        if (!checkComponentAttribute(treeNode.props, attr))
+        if (!matchesComponentAttribute(treeNode.props, attr))
           return false;
       }
       return true;

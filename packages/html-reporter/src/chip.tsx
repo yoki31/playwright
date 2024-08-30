@@ -19,24 +19,27 @@ import './chip.css';
 import './colors.css';
 import './common.css';
 import * as icons from './icons';
+import { clsx } from '@web/uiUtils';
 
-export const Chip: React.FunctionComponent<{
+export const Chip: React.FC<{
   header: JSX.Element | string,
   expanded?: boolean,
   noInsets?: boolean,
   setExpanded?: (expanded: boolean) => void,
   children?: any,
-}> = ({ header, expanded, setExpanded, children, noInsets }) => {
-  return <div className='chip'>
+  dataTestId?: string,
+  targetRef?: React.RefObject<HTMLDivElement>,
+}> = ({ header, expanded, setExpanded, children, noInsets, dataTestId, targetRef }) => {
+  return <div className='chip' data-testid={dataTestId} ref={targetRef}>
     <div
-      className={'chip-header' + (setExpanded ? ' expanded-' + expanded : '')}
+      className={clsx('chip-header', setExpanded && ' expanded-' + expanded)}
       onClick={() => setExpanded?.(!expanded)}
       title={typeof header === 'string' ? header : undefined}>
       {setExpanded && !!expanded && icons.downArrow()}
       {setExpanded && !expanded && icons.rightArrow()}
       {header}
     </div>
-    {(!setExpanded || expanded) && <div className={'chip-body' + (noInsets ? ' chip-body-no-insets' : '')}>{children}</div>}
+    {(!setExpanded || expanded) && <div className={clsx('chip-body', noInsets && 'chip-body-no-insets')}>{children}</div>}
   </div>;
 };
 
@@ -45,13 +48,17 @@ export const AutoChip: React.FC<{
   initialExpanded?: boolean,
   noInsets?: boolean,
   children?: any,
-}> = ({ header, initialExpanded, noInsets, children }) => {
+  dataTestId?: string,
+  targetRef?: React.RefObject<HTMLDivElement>,
+}> = ({ header, initialExpanded, noInsets, children, dataTestId, targetRef }) => {
   const [expanded, setExpanded] = React.useState(initialExpanded || initialExpanded === undefined);
   return <Chip
     header={header}
     expanded={expanded}
     setExpanded={setExpanded}
     noInsets={noInsets}
+    dataTestId={dataTestId}
+    targetRef={targetRef}
   >
     {children}
   </Chip>;

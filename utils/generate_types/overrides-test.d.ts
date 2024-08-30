@@ -14,325 +14,232 @@
  * limitations under the License.
  */
 
-import type { APIRequestContext, Browser, BrowserContext, BrowserContextOptions, Page, LaunchOptions, ViewportSize, Geolocation, HTTPCredentials } from 'playwright-core';
-import type { Expect } from './testExpect';
+import type { APIRequestContext, Browser, BrowserContext, BrowserContextOptions, Page, LaunchOptions, ViewportSize, Geolocation, HTTPCredentials, Locator, APIResponse, PageScreenshotOptions } from 'playwright-core';
+export * from 'playwright-core';
 
-export type { Expect } from './testExpect';
-
-export type ReporterDescription =
+export type ReporterDescription = Readonly<
+  ['blob'] | ['blob', { outputDir?: string, fileName?: string }] |
   ['dot'] |
   ['line'] |
-  ['list'] |
+  ['list'] | ['list', { printSteps?: boolean }] |
   ['github'] |
-  ['junit'] | ['junit', { outputFile?: string, stripANSIControlSequences?: boolean }] |
+  ['junit'] | ['junit', { outputFile?: string, stripANSIControlSequences?: boolean, includeProjectInTestName?: boolean }] |
   ['json'] | ['json', { outputFile?: string }] |
-  ['html'] | ['html', { outputFolder?: string, open?: 'always' | 'never' | 'on-failure' }] |
+  ['html'] | ['html', { outputFolder?: string, open?: 'always' | 'never' | 'on-failure', host?: string, port?: number, attachmentsBaseURL?: string }] |
   ['null'] |
-  [string] | [string, any];
+  [string] | [string, any]
+>;
 
-export type Shard = { total: number, current: number } | null;
-export type ReportSlowTests = { max: number, threshold: number } | null;
-export type PreserveOutput = 'always' | 'never' | 'failures-only';
-export type UpdateSnapshots = 'all' | 'none' | 'missing';
+type UseOptions<TestArgs, WorkerArgs> = Partial<WorkerArgs> & Partial<TestArgs>;
 
-type UseOptions<TestArgs, WorkerArgs> = { [K in keyof WorkerArgs]?: WorkerArgs[K] } & { [K in keyof TestArgs]?: TestArgs[K] };
-
-type ExpectSettings = {
-  // Default timeout for async expect matchers in milliseconds, defaults to 5000ms.
-  timeout?: number;
-  toMatchSnapshot?: {
-    // Pixel match threshold.
-    threshold?: number
-  }
-};
-
-interface TestProject {
-  expect?: ExpectSettings;
-  metadata?: any;
-  name?: string;
-  snapshotDir?: string;
-  outputDir?: string;
-  repeatEach?: number;
-  retries?: number;
-  testDir?: string;
-  testIgnore?: string | RegExp | (string | RegExp)[];
-  testMatch?: string | RegExp | (string | RegExp)[];
-  timeout?: number;
-}
-
-export interface Project<TestArgs = {}, WorkerArgs = {}> extends TestProject {
+interface TestProject<TestArgs = {}, WorkerArgs = {}> {
   use?: UseOptions<TestArgs, WorkerArgs>;
 }
 
-export type FullProject<TestArgs = {}, WorkerArgs = {}> = Required<Project<PlaywrightTestOptions & TestArgs, PlaywrightWorkerOptions & WorkerArgs>>;
+export interface Project<TestArgs = {}, WorkerArgs = {}> extends TestProject<TestArgs, WorkerArgs> {
+}
 
-export type WebServerConfig = {
-  /**
-   * Shell command to start. For example `npm run start`.
-   */
-  command: string,
-  /**
-   * The port that your http server is expected to appear on. It does wait until it accepts connections.
-   */
-  port: number,
-  /**
-   * How long to wait for the process to start up and be available in milliseconds. Defaults to 60000.
-   */
-  timeout?: number,
-  /**
-   * If true, it will re-use an existing server on the port when available. If no server is running
-   * on that port, it will run the command to start a new server.
-   * If false, it will throw if an existing process is listening on the port.
-   * This should commonly set to !process.env.CI to allow the local dev server when running tests locally.
-   */
-  reuseExistingServer?: boolean
-  /**
-   * Environment variables, process.env by default
-   */
-  env?: Record<string, string>,
-  /**
-   * Current working directory of the spawned process. Default is process.cwd().
-   */
-  cwd?: string,
-};
+export interface FullProject<TestArgs = {}, WorkerArgs = {}> {
+  use: UseOptions<PlaywrightTestOptions & TestArgs, PlaywrightWorkerOptions & WorkerArgs>;
+}
 
 type LiteralUnion<T extends U, U = string> = T | (U & { zz_IGNORE_ME?: never });
 
-interface TestConfig {
-  forbidOnly?: boolean;
-  globalSetup?: string;
-  globalTeardown?: string;
-  globalTimeout?: number;
-  grep?: RegExp | RegExp[];
-  grepInvert?: RegExp | RegExp[];
-  maxFailures?: number;
-  preserveOutput?: PreserveOutput;
-  projects?: Project[];
-  quiet?: boolean;
-  reporter?: LiteralUnion<'list'|'dot'|'line'|'github'|'json'|'junit'|'null'|'html', string> | ReporterDescription[];
-  reportSlowTests?: ReportSlowTests;
-  shard?: Shard;
-  updateSnapshots?: UpdateSnapshots;
-  webServer?: WebServerConfig;
-  workers?: number;
-
-  expect?: ExpectSettings;
-  metadata?: any;
-  name?: string;
-  snapshotDir?: string;
-  outputDir?: string;
-  repeatEach?: number;
-  retries?: number;
-  testDir?: string;
-  testIgnore?: string | RegExp | (string | RegExp)[];
-  testMatch?: string | RegExp | (string | RegExp)[];
-  timeout?: number;
-}
-
-export interface Config<TestArgs = {}, WorkerArgs = {}> extends TestConfig {
+interface TestConfig<TestArgs = {}, WorkerArgs = {}> {
   projects?: Project<TestArgs, WorkerArgs>[];
+  reporter?: LiteralUnion<'list'|'dot'|'line'|'github'|'json'|'junit'|'null'|'html', string> | ReporterDescription[];
   use?: UseOptions<TestArgs, WorkerArgs>;
+  webServer?: TestConfigWebServer | TestConfigWebServer[];
 }
+
+export interface Config<TestArgs = {}, WorkerArgs = {}> extends TestConfig<TestArgs, WorkerArgs> {
+}
+
+export type Metadata = { [key: string]: any };
 
 export interface FullConfig<TestArgs = {}, WorkerArgs = {}> {
-  forbidOnly: boolean;
-  globalSetup: string | null;
-  globalTeardown: string | null;
-  globalTimeout: number;
-  grep: RegExp | RegExp[];
-  grepInvert: RegExp | RegExp[] | null;
-  maxFailures: number;
-  version: string;
-  preserveOutput: PreserveOutput;
   projects: FullProject<TestArgs, WorkerArgs>[];
   reporter: ReporterDescription[];
-  reportSlowTests: ReportSlowTests;
-  rootDir: string;
-  quiet: boolean;
-  shard: Shard;
-  updateSnapshots: UpdateSnapshots;
-  workers: number;
-  webServer: WebServerConfig | null;
+  webServer: TestConfigWebServer | null;
 }
 
-export type TestStatus = 'passed' | 'failed' | 'timedOut' | 'skipped';
+export type TestStatus = 'passed' | 'failed' | 'timedOut' | 'skipped' | 'interrupted';
 
-export interface TestError {
-  message?: string;
-  stack?: string;
-  value?: string;
-}
+type TestDetailsAnnotation = {
+  type: string;
+  description?: string;
+};
 
-export interface WorkerInfo {
-  config: FullConfig;
-  parallelIndex: number;
-  project: FullProject;
-  workerIndex: number;
-}
+type TestDetailsTag = `@${string}`;
 
-export interface TestInfo {
-  config: FullConfig;
-  parallelIndex: number;
-  project: FullProject;
-  workerIndex: number;
-
-  title: string;
-  titlePath: string[];
-  file: string;
-  line: number;
-  column: number;
-  fn: Function;
-
-  skip(): void;
-  skip(condition: boolean): void;
-  skip(condition: boolean, description: string): void;
-
-  fixme(): void;
-  fixme(condition: boolean): void;
-  fixme(condition: boolean, description: string): void;
-
-  fail(): void;
-  fail(condition: boolean): void;
-  fail(condition: boolean, description: string): void;
-
-  slow(): void;
-  slow(condition: boolean): void;
-  slow(condition: boolean, description: string): void;
-
-  setTimeout(timeout: number): void;
-  expectedStatus: TestStatus;
-  timeout: number;
-  annotations: { type: string, description?: string }[];
-  attachments: { name: string, path?: string, body?: Buffer, contentType: string }[];
-  attach(name: string, options?: { contentType?: string, path?: string, body?: string | Buffer }): Promise<void>;
-  repeatEachIndex: number;
-  retry: number;
-  duration: number;
-  status?: TestStatus;
-  error?: TestError;
-  stdout: (string | Buffer)[];
-  stderr: (string | Buffer)[];
-  snapshotSuffix: string;
-  snapshotDir: string;
-  outputDir: string;
-  snapshotPath: (...pathSegments: string[]) => string;
-  outputPath: (...pathSegments: string[]) => string;
+export type TestDetails = {
+  tag?: TestDetailsTag | TestDetailsTag[];
+  annotation?: TestDetailsAnnotation | TestDetailsAnnotation[];
 }
 
 interface SuiteFunction {
   (title: string, callback: () => void): void;
+  (callback: () => void): void;
+  (title: string, details: TestDetails, callback: () => void): void;
 }
 
 interface TestFunction<TestArgs> {
-  (title: string, testFunction: (args: TestArgs, testInfo: TestInfo) => Promise<void> | void): void;
+  (title: string, body: (args: TestArgs, testInfo: TestInfo) => Promise<void> | void): void;
+  (title: string, details: TestDetails, body: (args: TestArgs, testInfo: TestInfo) => Promise<void> | void): void;
 }
 
 export interface TestType<TestArgs extends KeyValue, WorkerArgs extends KeyValue> extends TestFunction<TestArgs & WorkerArgs> {
   only: TestFunction<TestArgs & WorkerArgs>;
   describe: SuiteFunction & {
     only: SuiteFunction;
+    skip: SuiteFunction;
+    fixme: SuiteFunction;
     serial: SuiteFunction & {
       only: SuiteFunction;
     };
     parallel: SuiteFunction & {
       only: SuiteFunction;
     };
+    configure: (options: { mode?: 'default' | 'parallel' | 'serial', retries?: number, timeout?: number }) => void;
   };
-  skip(title: string, testFunction: (args: TestArgs & WorkerArgs, testInfo: TestInfo) => Promise<void> | void): void;
+  skip(title: string, body: (args: TestArgs & WorkerArgs, testInfo: TestInfo) => Promise<void> | void): void;
+  skip(title: string, details: TestDetails, body: (args: TestArgs & WorkerArgs, testInfo: TestInfo) => Promise<void> | void): void;
   skip(): void;
   skip(condition: boolean, description?: string): void;
   skip(callback: (args: TestArgs & WorkerArgs) => boolean, description?: string): void;
-  fixme(title: string, testFunction: (args: TestArgs & WorkerArgs, testInfo: TestInfo) => Promise<void> | void): void;
+  fixme(title: string, body: (args: TestArgs & WorkerArgs, testInfo: TestInfo) => Promise<void> | void): void;
+  fixme(title: string, details: TestDetails, body: (args: TestArgs & WorkerArgs, testInfo: TestInfo) => Promise<void> | void): void;
   fixme(): void;
   fixme(condition: boolean, description?: string): void;
   fixme(callback: (args: TestArgs & WorkerArgs) => boolean, description?: string): void;
+  fail(title: string, body: (args: TestArgs & WorkerArgs, testInfo: TestInfo) => Promise<void> | void): void;
+  fail(title: string, details: TestDetails, body: (args: TestArgs & WorkerArgs, testInfo: TestInfo) => Promise<void> | void): void;
+  fail(condition: boolean, description?: string): void;
+  fail(callback: (args: TestArgs & WorkerArgs) => boolean, description?: string): void;
   fail(): void;
-  fail(condition: boolean): void;
-  fail(condition: boolean, description: string): void;
-  fail(callback: (args: TestArgs & WorkerArgs) => boolean): void;
-  fail(callback: (args: TestArgs & WorkerArgs) => boolean, description: string): void;
   slow(): void;
-  slow(condition: boolean): void;
-  slow(condition: boolean, description: string): void;
-  slow(callback: (args: TestArgs & WorkerArgs) => boolean): void;
-  slow(callback: (args: TestArgs & WorkerArgs) => boolean, description: string): void;
+  slow(condition: boolean, description?: string): void;
+  slow(callback: (args: TestArgs & WorkerArgs) => boolean, description?: string): void;
   setTimeout(timeout: number): void;
   beforeEach(inner: (args: TestArgs & WorkerArgs, testInfo: TestInfo) => Promise<any> | any): void;
+  beforeEach(title: string, inner: (args: TestArgs & WorkerArgs, testInfo: TestInfo) => Promise<any> | any): void;
   afterEach(inner: (args: TestArgs & WorkerArgs, testInfo: TestInfo) => Promise<any> | any): void;
+  afterEach(title: string, inner: (args: TestArgs & WorkerArgs, testInfo: TestInfo) => Promise<any> | any): void;
   beforeAll(inner: (args: TestArgs & WorkerArgs, testInfo: TestInfo) => Promise<any> | any): void;
+  beforeAll(title: string, inner: (args: TestArgs & WorkerArgs, testInfo: TestInfo) => Promise<any> | any): void;
   afterAll(inner: (args: TestArgs & WorkerArgs, testInfo: TestInfo) => Promise<any> | any): void;
+  afterAll(title: string, inner: (args: TestArgs & WorkerArgs, testInfo: TestInfo) => Promise<any> | any): void;
   use(fixtures: Fixtures<{}, {}, TestArgs, WorkerArgs>): void;
-  step(title: string, body: () => Promise<any>): Promise<any>;
-  expect: Expect;
-  extend<T, W extends KeyValue = {}>(fixtures: Fixtures<T, W, TestArgs, WorkerArgs>): TestType<TestArgs & T, WorkerArgs & W>;
+  step<T>(title: string, body: () => T | Promise<T>, options?: { box?: boolean }): Promise<T>;
+  expect: Expect<{}>;
+  extend<T extends KeyValue, W extends KeyValue = {}>(fixtures: Fixtures<T, W, TestArgs, WorkerArgs>): TestType<TestArgs & T, WorkerArgs & W>;
   info(): TestInfo;
 }
 
 type KeyValue = { [key: string]: any };
 export type TestFixture<R, Args extends KeyValue> = (args: Args, use: (r: R) => Promise<void>, testInfo: TestInfo) => any;
 export type WorkerFixture<R, Args extends KeyValue> = (args: Args, use: (r: R) => Promise<void>, workerInfo: WorkerInfo) => any;
-type TestFixtureValue<R, Args> = Exclude<R, Function> | TestFixture<R, Args>;
-type WorkerFixtureValue<R, Args> = Exclude<R, Function> | WorkerFixture<R, Args>;
+type TestFixtureValue<R, Args extends KeyValue> = Exclude<R, Function> | TestFixture<R, Args>;
+type WorkerFixtureValue<R, Args extends KeyValue> = Exclude<R, Function> | WorkerFixture<R, Args>;
 export type Fixtures<T extends KeyValue = {}, W extends KeyValue = {}, PT extends KeyValue = {}, PW extends KeyValue = {}> = {
-  [K in keyof PW]?: WorkerFixtureValue<PW[K], W & PW> | [WorkerFixtureValue<PW[K], W & PW>, { scope: 'worker' }];
+  [K in keyof PW]?: WorkerFixtureValue<PW[K], W & PW> | [WorkerFixtureValue<PW[K], W & PW>, { scope: 'worker', timeout?: number | undefined, title?: string, box?: boolean }];
 } & {
-  [K in keyof PT]?: TestFixtureValue<PT[K], T & W & PT & PW> | [TestFixtureValue<PT[K], T & W & PT & PW>, { scope: 'test' }];
+  [K in keyof PT]?: TestFixtureValue<PT[K], T & W & PT & PW> | [TestFixtureValue<PT[K], T & W & PT & PW>, { scope: 'test', timeout?: number | undefined, title?: string, box?: boolean }];
 } & {
-  [K in keyof W]?: [WorkerFixtureValue<W[K], W & PW>, { scope: 'worker', auto?: boolean, option?: boolean }];
+  [K in keyof W]?: [WorkerFixtureValue<W[K], W & PW>, { scope: 'worker', auto?: boolean, option?: boolean, timeout?: number | undefined, title?: string, box?: boolean }];
 } & {
-  [K in keyof T]?: TestFixtureValue<T[K], T & W & PT & PW> | [TestFixtureValue<T[K], T & W & PT & PW>, { scope?: 'test', auto?: boolean, option?: boolean }];
+  [K in keyof T]?: TestFixtureValue<T[K], T & W & PT & PW> | [TestFixtureValue<T[K], T & W & PT & PW>, { scope?: 'test', auto?: boolean, option?: boolean, timeout?: number | undefined, title?: string, box?: boolean }];
 };
 
 type BrowserName = 'chromium' | 'firefox' | 'webkit';
 type BrowserChannel = Exclude<LaunchOptions['channel'], undefined>;
 type ColorScheme = Exclude<BrowserContextOptions['colorScheme'], undefined>;
+type ClientCertificate = Exclude<BrowserContextOptions['clientCertificates'], undefined>[0];
 type ExtraHTTPHeaders = Exclude<BrowserContextOptions['extraHTTPHeaders'], undefined>;
 type Proxy = Exclude<BrowserContextOptions['proxy'], undefined>;
 type StorageState = Exclude<BrowserContextOptions['storageState'], undefined>;
+type ServiceWorkerPolicy = Exclude<BrowserContextOptions['serviceWorkers'], undefined>;
+type ConnectOptions = {
+  /**
+   * A browser websocket endpoint to connect to.
+   */
+  wsEndpoint: string;
+
+  /**
+   * Additional HTTP headers to be sent with web socket connect request.
+   */
+  headers?: { [key: string]: string; };
+
+  /**
+   * This option exposes network available on the connecting client to the browser being connected to.
+   * Consists of a list of rules separated by comma.
+   *
+   * Available rules:
+   * - Hostname pattern, for example: `example.com`, `*.org:99`, `x.*.y.com`, `*foo.org`.
+   * - IP literal, for example: `127.0.0.1`, `0.0.0.0:99`, `[::1]`, `[0:0::1]:99`.
+   * - `<loopback>` that matches local loopback interfaces: `localhost`, `*.localhost`, `127.0.0.1`, `[::1]`.
+
+   * Some common examples:
+   * - `"*"` to expose all network.
+   * - `"<loopback>"` to expose localhost network.
+   * - `"*.test.internal-domain,*.staging.internal-domain,<loopback>"` to expose test/staging deployments and localhost.
+   */
+  exposeNetwork?: string;
+
+  /**
+   * Timeout in milliseconds for the connection to be established. Optional, defaults to no timeout.
+   */
+  timeout?: number;
+};
 
 export interface PlaywrightWorkerOptions {
   browserName: BrowserName;
   defaultBrowserType: BrowserName;
-  headless: boolean | undefined;
+  headless: boolean;
   channel: BrowserChannel | undefined;
-  launchOptions: LaunchOptions;
-  screenshot: 'off' | 'on' | 'only-on-failure';
-  trace: TraceMode | /** deprecated */ 'retry-with-trace' | { mode: TraceMode, snapshots?: boolean, screenshots?: boolean, sources?: boolean };
+  launchOptions: Omit<LaunchOptions, 'tracesDir'>;
+  connectOptions: ConnectOptions | undefined;
+  screenshot: ScreenshotMode | { mode: ScreenshotMode } & Pick<PageScreenshotOptions, 'fullPage' | 'omitBackground'>;
+  trace: TraceMode | /** deprecated */ 'retry-with-trace' | { mode: TraceMode, snapshots?: boolean, screenshots?: boolean, sources?: boolean, attachments?: boolean };
   video: VideoMode | /** deprecated */ 'retry-with-video' | { mode: VideoMode, size?: ViewportSize };
 }
 
-export type TraceMode = 'off' | 'on' | 'retain-on-failure' | 'on-first-retry';
+export type ScreenshotMode = 'off' | 'on' | 'only-on-failure';
+export type TraceMode = 'off' | 'on' | 'retain-on-failure' | 'on-first-retry' | 'on-all-retries' | 'retain-on-first-failure';
 export type VideoMode = 'off' | 'on' | 'retain-on-failure' | 'on-first-retry';
 
 export interface PlaywrightTestOptions {
-  acceptDownloads: boolean | undefined;
-  bypassCSP: boolean | undefined;
-  colorScheme: ColorScheme | undefined;
+  acceptDownloads: boolean;
+  bypassCSP: boolean;
+  colorScheme: ColorScheme;
+  clientCertificates: ClientCertificate[] | undefined;
   deviceScaleFactor: number | undefined;
   extraHTTPHeaders: ExtraHTTPHeaders | undefined;
   geolocation: Geolocation | undefined;
-  hasTouch: boolean | undefined;
+  hasTouch: boolean;
   httpCredentials: HTTPCredentials | undefined;
-  ignoreHTTPSErrors: boolean | undefined;
-  isMobile: boolean | undefined;
-  javaScriptEnabled: boolean | undefined;
+  ignoreHTTPSErrors: boolean;
+  isMobile: boolean;
+  javaScriptEnabled: boolean;
   locale: string | undefined;
-  offline: boolean | undefined;
+  offline: boolean;
   permissions: string[] | undefined;
   proxy: Proxy | undefined;
   storageState: StorageState | undefined;
   timezoneId: string | undefined;
   userAgent: string | undefined;
-  viewport: ViewportSize | null | undefined;
+  viewport: ViewportSize | null;
   baseURL: string | undefined;
   contextOptions: BrowserContextOptions;
-  actionTimeout: number | undefined;
-  navigationTimeout: number | undefined;
+  actionTimeout: number;
+  navigationTimeout: number;
+  serviceWorkers: ServiceWorkerPolicy;
+  testIdAttribute: string;
 }
 
 
 export interface PlaywrightWorkerArgs {
-  playwright: typeof import('..');
+  playwright: typeof import('playwright-core');
   browser: Browser;
 }
 
@@ -342,8 +249,189 @@ export interface PlaywrightTestArgs {
   request: APIRequestContext;
 }
 
-export type PlaywrightTestProject<TestArgs = {}, WorkerArgs = {}> = Project<PlaywrightTestOptions & TestArgs, PlaywrightWorkerOptions & WorkerArgs>;
-export type PlaywrightTestConfig<TestArgs = {}, WorkerArgs = {}> = Config<PlaywrightTestOptions & TestArgs, PlaywrightWorkerOptions & WorkerArgs>;
+type ExcludeProps<A, B> = {
+  [K in Exclude<keyof A, keyof B>]: A[K];
+};
+type CustomProperties<T> = ExcludeProps<T, PlaywrightTestOptions & PlaywrightWorkerOptions & PlaywrightTestArgs & PlaywrightWorkerArgs>;
+
+export type PlaywrightTestProject<TestArgs = {}, WorkerArgs = {}> = Project<PlaywrightTestOptions & CustomProperties<TestArgs>, PlaywrightWorkerOptions & CustomProperties<WorkerArgs>>;
+export type PlaywrightTestConfig<TestArgs = {}, WorkerArgs = {}> = Config<PlaywrightTestOptions & CustomProperties<TestArgs>, PlaywrightWorkerOptions & CustomProperties<WorkerArgs>>;
+
+type AsymmetricMatcher = Record<string, any>;
+
+interface AsymmetricMatchers {
+  any(sample: unknown): AsymmetricMatcher;
+  anything(): AsymmetricMatcher;
+  arrayContaining(sample: Array<unknown>): AsymmetricMatcher;
+  closeTo(sample: number, precision?: number): AsymmetricMatcher;
+  objectContaining(sample: Record<string, unknown>): AsymmetricMatcher;
+  stringContaining(sample: string): AsymmetricMatcher;
+  stringMatching(sample: string | RegExp): AsymmetricMatcher;
+}
+
+interface GenericAssertions<R> {
+  not: GenericAssertions<R>;
+  toBe(expected: unknown): R;
+  toBeCloseTo(expected: number, numDigits?: number): R;
+  toBeDefined(): R;
+  toBeFalsy(): R;
+  toBeGreaterThan(expected: number | bigint): R;
+  toBeGreaterThanOrEqual(expected: number | bigint): R;
+  toBeInstanceOf(expected: Function): R;
+  toBeLessThan(expected: number | bigint): R;
+  toBeLessThanOrEqual(expected: number | bigint): R;
+  toBeNaN(): R;
+  toBeNull(): R;
+  toBeTruthy(): R;
+  toBeUndefined(): R;
+  toContain(expected: string): R;
+  toContain(expected: unknown): R;
+  toContainEqual(expected: unknown): R;
+  toEqual(expected: unknown): R;
+  toHaveLength(expected: number): R;
+  toHaveProperty(keyPath: string | Array<string>, value?: unknown): R;
+  toMatch(expected: RegExp | string): R;
+  toMatchObject(expected: Record<string, unknown> | Array<unknown>): R;
+  toStrictEqual(expected: unknown): R;
+  toThrow(error?: unknown): R;
+  toThrowError(error?: unknown): R;
+}
+
+type FunctionAssertions = {
+  /**
+   * Retries the callback until all assertions within it pass or the `timeout` value is reached.
+   * The `intervals` parameter can be used to establish the probing frequency or pattern.
+   *
+   * **Usage**
+   * ```js
+   * await expect(async () => {
+   *   const response = await page.request.get('https://api.example.com');
+   *   expect(response.status()).toBe(200);
+   * }).toPass({
+   *   // Probe, wait 1s, probe, wait 2s, probe, wait 10s, probe, wait 10s, probe
+   *   intervals: [1_000, 2_000, 10_000], // Defaults to [100, 250, 500, 1000].
+   *   timeout: 60_000 // Defaults to 0
+   * });
+   * ```
+   *
+   * Note that by default `toPass` does not respect custom expect timeout.
+   *
+   * @param options
+   */
+  toPass(options?: { timeout?: number, intervals?: number[] }): Promise<void>;
+};
+
+type BaseMatchers<R, T> = GenericAssertions<R> & PlaywrightTest.Matchers<R, T> & SnapshotAssertions;
+type AllowedGenericMatchers<R, T> = PlaywrightTest.Matchers<R, T> & Pick<GenericAssertions<R>, 'toBe' | 'toBeDefined' | 'toBeFalsy' | 'toBeNull' | 'toBeTruthy' | 'toBeUndefined'>;
+
+type SpecificMatchers<R, T> =
+  T extends Page ? PageAssertions & AllowedGenericMatchers<R, T> :
+  T extends Locator ? LocatorAssertions & AllowedGenericMatchers<R, T> :
+  T extends APIResponse ? APIResponseAssertions & AllowedGenericMatchers<R, T> :
+  BaseMatchers<R, T> & (T extends Function ? FunctionAssertions : {});
+type AllMatchers<R, T> = PageAssertions & LocatorAssertions & APIResponseAssertions & FunctionAssertions & BaseMatchers<R, T>;
+
+type IfAny<T, Y, N> = 0 extends (1 & T) ? Y : N;
+type Awaited<T> = T extends PromiseLike<infer U> ? U : T;
+type ToUserMatcher<F> = F extends (first: any, ...args: infer Rest) => infer R ? (...args: Rest) => (R extends PromiseLike<infer U> ? Promise<void> : void) : never;
+type ToUserMatcherObject<T, ArgType> = {
+  [K in keyof T as T[K] extends (arg: ArgType, ...rest: any[]) => any ? K : never]: ToUserMatcher<T[K]>;
+};
+
+type MatcherHintColor = (arg: string) => string;
+
+export type MatcherHintOptions = {
+  comment?: string;
+  expectedColor?: MatcherHintColor;
+  isDirectExpectCall?: boolean;
+  isNot?: boolean;
+  promise?: string;
+  receivedColor?: MatcherHintColor;
+  secondArgument?: string;
+  secondArgumentColor?: MatcherHintColor;
+};
+
+export interface ExpectMatcherUtils {
+  matcherHint(matcherName: string, received: unknown, expected: unknown, options?: MatcherHintOptions): string;
+  printDiffOrStringify(expected: unknown, received: unknown, expectedLabel: string, receivedLabel: string, expand: boolean): string;
+  printExpected(value: unknown): string;
+  printReceived(object: unknown): string;
+  printWithType<T>(name: string, value: T, print: (value: T) => string): string;
+  diff(a: unknown, b: unknown): string | null;
+  stringify(object: unknown, maxDepth?: number, maxWidth?: number): string;
+}
+
+export type ExpectMatcherState = {
+  /**
+   * Whether this matcher was called with the negated .not modifier.
+   */
+  isNot: boolean;
+  /**
+   * - 'rejects' if matcher was called with the promise .rejects modifier
+   * - 'resolves' if matcher was called with the promise .resolves modifier
+   * - '' if matcher was not called with a promise modifier
+   */
+  promise: 'rejects' | 'resolves' | '';
+  utils: ExpectMatcherUtils;
+  /**
+   * Timeout in milliseconds for the assertion to be fulfilled.
+   */
+  timeout: number;
+};
+
+export type MatcherReturnType = {
+  message: () => string;
+  pass: boolean;
+  name?: string;
+  expected?: unknown;
+  actual?: any;
+  log?: string[];
+};
+
+type MakeMatchers<R, T, ExtendedMatchers> = {
+  /**
+   * If you know how to test something, `.not` lets you test its opposite.
+   */
+  not: MakeMatchers<R, T, ExtendedMatchers>;
+  /**
+   * Use resolves to unwrap the value of a fulfilled promise so any other
+   * matcher can be chained. If the promise is rejected the assertion fails.
+   */
+  resolves: MakeMatchers<Promise<R>, Awaited<T>, ExtendedMatchers>;
+  /**
+   * Unwraps the reason of a rejected promise so any other matcher can be chained.
+   * If the promise is fulfilled the assertion fails.
+   */
+  rejects: MakeMatchers<Promise<R>, any, ExtendedMatchers>;
+} & IfAny<T, AllMatchers<R, T>, SpecificMatchers<R, T> & ToUserMatcherObject<ExtendedMatchers, T>>;
+
+export type Expect<ExtendedMatchers = {}> = {
+  <T = unknown>(actual: T, messageOrOptions?: string | { message?: string }): MakeMatchers<void, T, ExtendedMatchers>;
+  soft: <T = unknown>(actual: T, messageOrOptions?: string | { message?: string }) => MakeMatchers<void, T, ExtendedMatchers>;
+  poll: <T = unknown>(actual: () => T | Promise<T>, messageOrOptions?: string | { message?: string, timeout?: number, intervals?: number[] }) => BaseMatchers<Promise<void>, T> & {
+    /**
+     * If you know how to test something, `.not` lets you test its opposite.
+     */
+     not: BaseMatchers<Promise<void>, T>;
+  };
+  extend<MoreMatchers extends Record<string, (this: ExpectMatcherState, receiver: any, ...args: any[]) => MatcherReturnType | Promise<MatcherReturnType>>>(matchers: MoreMatchers): Expect<ExtendedMatchers & MoreMatchers>;
+  configure: (configuration: {
+    message?: string,
+    timeout?: number,
+    soft?: boolean,
+  }) => Expect<ExtendedMatchers>;
+  getState(): unknown;
+  not: Omit<AsymmetricMatchers, 'any' | 'anything'>;
+} & AsymmetricMatchers;
+
+// --- BEGINGLOBAL ---
+declare global {
+  export namespace PlaywrightTest {
+    export interface Matchers<R, T = unknown> {
+    }
+  }
+}
+// --- ENDGLOBAL ---
 
 /**
  * These tests are executed in Playwright environment that launches the browser
@@ -353,7 +441,35 @@ export const test: TestType<PlaywrightTestArgs & PlaywrightTestOptions, Playwrig
 export default test;
 
 export const _baseTest: TestType<{}, {}>;
-export const expect: Expect;
+export const expect: Expect<{}>;
+
+/**
+ * Defines Playwright config
+ */
+export function defineConfig(config: PlaywrightTestConfig): PlaywrightTestConfig;
+export function defineConfig<T>(config: PlaywrightTestConfig<T>): PlaywrightTestConfig<T>;
+export function defineConfig<T, W>(config: PlaywrightTestConfig<T, W>): PlaywrightTestConfig<T, W>;
+export function defineConfig(config: PlaywrightTestConfig, ...configs: PlaywrightTestConfig[]): PlaywrightTestConfig;
+export function defineConfig<T>(config: PlaywrightTestConfig<T>, ...configs: PlaywrightTestConfig[]): PlaywrightTestConfig<T>;
+export function defineConfig<T, W>(config: PlaywrightTestConfig<T, W>, ...configs: PlaywrightTestConfig[]): PlaywrightTestConfig<T, W>;
+
+type MergedT<List> = List extends [TestType<infer T, any>, ...(infer Rest)] ? T & MergedT<Rest> : {};
+type MergedW<List> = List extends [TestType<any, infer W>, ...(infer Rest)] ? W & MergedW<Rest> : {};
+type MergedTestType<List> = TestType<MergedT<List>, MergedW<List>>;
+
+/**
+ * Merges fixtures
+ */
+export function mergeTests<List extends any[]>(...tests: List): MergedTestType<List>;
+
+type MergedExpectMatchers<List> = List extends [Expect<infer M>, ...(infer Rest)] ? M & MergedExpectMatchers<Rest> : {};
+type MergedExpect<List> = Expect<MergedExpectMatchers<List>>;
+
+/**
+ * Merges expects
+ */
+export function mergeExpects<List extends any[]>(...expects: List): MergedExpect<List>;
 
 // This is required to not export everything by default. See https://github.com/Microsoft/TypeScript/issues/19545#issuecomment-340490459
-export {};
+export { };
+

@@ -5,14 +5,17 @@
 # Include sources from lib, but not map files.
 !lib/**/*.js
 # Include web assets for recorder, trace viewer, etc.
+!lib/**/*.css
 !lib/**/*.html
 !lib/**/*.png
+!lib/**/*.svg
 !lib/**/*.ttf
+!lib/utilsBundleImpl/xdg-open
 # Exclude injected files. A preprocessed version of these is included via lib/generated.
 # See src/server/injected/README.md.
 lib/**/injected/
 # Include all binaries that we ship with the package.
-!bin/*
+!bin/**/*
 # Include FFMPEG
 !third_party/ffmpeg/*
 # Include generated types and entrypoint.
@@ -35,3 +38,4 @@ lib/**/injected/
 !browsers.json
 # Include generated devices descriptors
 !deviceDescriptorsSource.json
+!ThirdPartyNotices.txt

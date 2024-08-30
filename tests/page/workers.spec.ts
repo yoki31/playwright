@@ -16,10 +16,13 @@
  */
 
 import { test as it, expect } from './pageTest';
+import type { Worker as PwWorker } from '@playwright/test';
 import { attachFrame } from '../config/utils';
 import type { ConsoleMessage } from 'playwright-core';
+import fs from 'fs';
+import { kTargetClosedErrorMessage } from '../config/errors';
 
-it('Page.workers #smoke', async function({ page, server }) {
+it('Page.workers @smoke', async function({ page, server }) {
   await Promise.all([
     page.waitForEvent('worker'),
     page.goto(server.PREFIX + '/worker/worker.html')]);
@@ -41,7 +44,8 @@ it('should emit created and destroyed events', async function({ page }) {
   await page.evaluate(workerObj => workerObj.terminate(), workerObj);
   expect(await workerDestroyedPromise).toBe(worker);
   const error = await workerThisObj.getProperty('self').catch(error => error);
-  expect(error.message).toMatch(/jsHandle.getProperty: (Worker was closed|Target closed)/);
+  expect(error.message).toContain('jsHandle.getProperty');
+  expect(error.message).toContain(kTargetClosedErrorMessage);
 });
 
 it('should report console logs', async function({ page }) {
@@ -125,8 +129,9 @@ it('should clear upon cross-process navigation', async function({ server, page }
   expect(page.workers().length).toBe(0);
 });
 
-it('should attribute network activity for worker inside iframe to the iframe', async function({ page, server, browserName }) {
-  it.fixme(browserName === 'firefox' || browserName === 'chromium');
+it('should attribute network activity for worker inside iframe to the iframe', async function({ page, server, browserName, browserMajorVersion }) {
+  it.fixme(browserName === 'chromium');
+  it.skip(browserName === 'firefox' && browserMajorVersion < 114, 'https://github.com/microsoft/playwright/issues/21760');
 
   await page.goto(server.PREFIX + '/empty.html');
   const [worker, frame] = await Promise.all([
@@ -142,7 +147,8 @@ it('should attribute network activity for worker inside iframe to the iframe', a
   expect(request.frame()).toBe(frame);
 });
 
-it('should report network activity', async function({ page, server }) {
+it('should report network activity', async function({ page, server, browserName, browserMajorVersion, asset }) {
+  it.skip(browserName === 'firefox' && browserMajorVersion < 114, 'https://github.com/microsoft/playwright/issues/21760');
   const [worker] = await Promise.all([
     page.waitForEvent('worker'),
     page.goto(server.PREFIX + '/worker/worker.html'),
@@ -156,9 +162,11 @@ it('should report network activity', async function({ page, server }) {
   expect(request.url()).toBe(url);
   expect(response.request()).toBe(request);
   expect(response.ok()).toBe(true);
+  expect(await response.text()).toBe(fs.readFileSync(asset('one-style.css'), 'utf8'));
 });
 
-it('should report network activity on worker creation', async function({ page, server }) {
+it('should report network activity on worker creation', async function({ page, server, browserName, browserMajorVersion }) {
+  it.skip(browserName === 'firefox' && browserMajorVersion < 114, 'https://github.com/microsoft/playwright/issues/21760');
   // Chromium needs waitForDebugger enabled for this one.
   await page.goto(server.EMPTY_PAGE);
   const url = server.PREFIX + '/one-style.css';
@@ -172,4 +180,76 @@ it('should report network activity on worker creation', async function({ page, s
   expect(request.url()).toBe(url);
   expect(response.request()).toBe(request);
   expect(response.ok()).toBe(true);
+});
+
+it('should dispatch console messages when page has workers', async function({ page, server }) {
+  it.info().annotations.push({ type: 'issue', description: 'https://github.com/microsoft/playwright/issues/15550' });
+  await page.goto(server.EMPTY_PAGE);
+  await Promise.all([
+    page.waitForEvent('worker'),
+    page.evaluate(() => new Worker(URL.createObjectURL(new Blob(['const x = 1;'], { type: 'application/javascript' }))))
+  ]);
+  const [message] = await Promise.all([
+    page.waitForEvent('console'),
+    page.evaluate(() => console.log('foo'))
+  ]);
+  expect(message.text()).toBe('foo');
+});
+
+it('should report and intercept network from nested worker', async function({ page, server, browserName }) {
+  it.fixme(browserName === 'webkit', 'https://github.com/microsoft/playwright/issues/27376');
+  await page.route('**/simple.json', async route => {
+    const json = { foo: 'not bar' };
+    await route.fulfill({ json });
+  });
+
+  await page.goto(server.EMPTY_PAGE);
+  const url = server.PREFIX + '/simple.json';
+  const workers: PwWorker[] = [];
+  const messages: string[] = [];
+
+  page.on('worker', worker => workers.push(worker));
+  page.on('console', msg => messages.push(msg.text()));
+
+  await page.evaluate(url => new Worker(URL.createObjectURL(new Blob([`
+    fetch("${url}").then(response => response.text()).then(t => console.log(t.trim()));
+  `], { type: 'application/javascript' }))), url);
+  await expect.poll(() => workers.length).toBe(1);
+
+  await workers[0].evaluate(url => new Worker(URL.createObjectURL(new Blob([`
+    fetch("${url}").then(response => response.text()).then(t => console.log(t.trim()));
+  `], { type: 'application/javascript' }))), url);
+
+  await expect.poll(() => workers.length).toBe(2);
+
+  await expect.poll(() => messages).toEqual(['{"foo":"not bar"}', '{"foo":"not bar"}']);
+});
+
+it('should support extra http headers', async ({ page, server }) => {
+  await page.setExtraHTTPHeaders({ foo: 'bar' });
+  const [worker, request1] = await Promise.all([
+    page.waitForEvent('worker'),
+    server.waitForRequest('/worker/worker.js'),
+    page.goto(server.PREFIX + '/worker/worker.html'),
+  ]);
+  const [request2] = await Promise.all([
+    server.waitForRequest('/one-style.css'),
+    worker.evaluate(url => fetch(url), server.PREFIX + '/one-style.css'),
+  ]);
+  expect(request1.headers['foo']).toBe('bar');
+  expect(request2.headers['foo']).toBe('bar');
+});
+
+it('should support offline', async ({ page, server, browserName }) => {
+  it.fixme(browserName === 'firefox');
+
+  const [worker] = await Promise.all([
+    page.waitForEvent('worker'),
+    page.goto(server.PREFIX + '/worker/worker.html'),
+  ]);
+  await page.context().setOffline(true);
+  expect(await worker.evaluate(() => navigator.onLine)).toBe(false);
+  expect(await worker.evaluate(() => fetch('/one-style.css').catch(e => 'error'))).toBe('error');
+  await page.context().setOffline(false);
+  expect(await worker.evaluate(() => navigator.onLine)).toBe(true);
 });

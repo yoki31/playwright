@@ -14,16 +14,19 @@
  * limitations under the License.
  */
 
-import { EventEmitter } from 'events';
-import * as channels from '../protocol/channels';
-import { createScheme, ValidationError, Validator } from '../protocol/validator';
+import { EventEmitter } from './eventEmitter';
+import type * as channels from '@protocol/channels';
+import { maybeFindValidator, ValidationError, type ValidatorContext } from '../protocol/validator';
 import { debugLogger } from '../utils/debugLogger';
-import { captureRawStack, captureStackTrace, ParsedStackTrace } from '../utils/stackTrace';
-import { isUnderTest } from '../utils/utils';
+import type { ExpectZone } from '../utils/stackTrace';
+import { captureLibraryStackTrace, stringifyStackFrames } from '../utils/stackTrace';
+import { isUnderTest } from '../utils';
 import { zones } from '../utils/zones';
-import { ClientInstrumentation } from './clientInstrumentation';
+import type { ClientInstrumentation } from './clientInstrumentation';
 import type { Connection } from './connection';
 import type { Logger } from './types';
+
+type Listener = (...args: any[]) => void;
 
 export abstract class ChannelOwner<T extends channels.Channel = channels.Channel> extends EventEmitter {
   readonly _connection: Connection;
@@ -35,16 +38,18 @@ export abstract class ChannelOwner<T extends channels.Channel = channels.Channel
   readonly _channel: T;
   readonly _initializer: channels.InitializerTraits<T>;
   _logger: Logger | undefined;
-  _instrumentation: ClientInstrumentation | undefined;
+  readonly _instrumentation: ClientInstrumentation;
+  private _eventToSubscriptionMapping: Map<string, string> = new Map();
+  _wasCollected: boolean = false;
 
-  constructor(parent: ChannelOwner | Connection, type: string, guid: string, initializer: channels.InitializerTraits<T>, instrumentation?: ClientInstrumentation) {
+  constructor(parent: ChannelOwner | Connection, type: string, guid: string, initializer: channels.InitializerTraits<T>) {
     super();
     this.setMaxListeners(0);
     this._connection = parent instanceof ChannelOwner ? parent._connection : parent;
     this._type = type;
     this._guid = guid;
     this._parent = parent instanceof ChannelOwner ? parent : undefined;
-    this._instrumentation = instrumentation || this._parent?._instrumentation;
+    this._instrumentation = this._connection._instrumentation;
 
     this._connection._objects.set(guid, this);
     if (this._parent) {
@@ -56,15 +61,70 @@ export abstract class ChannelOwner<T extends channels.Channel = channels.Channel
     this._initializer = initializer;
   }
 
-  _dispose() {
+  _setEventToSubscriptionMapping(mapping: Map<string, string>) {
+    this._eventToSubscriptionMapping = mapping;
+  }
+
+  private _updateSubscription(event: string | symbol, enabled: boolean) {
+    const protocolEvent = this._eventToSubscriptionMapping.get(String(event));
+    if (protocolEvent) {
+      this._wrapApiCall(async () => {
+        await (this._channel as any).updateSubscription({ event: protocolEvent, enabled });
+      }, true).catch(() => {});
+    }
+  }
+
+  override on(event: string | symbol, listener: Listener): this {
+    if (!this.listenerCount(event))
+      this._updateSubscription(event, true);
+    super.on(event, listener);
+    return this;
+  }
+
+  override addListener(event: string | symbol, listener: Listener): this {
+    if (!this.listenerCount(event))
+      this._updateSubscription(event, true);
+    super.addListener(event, listener);
+    return this;
+  }
+
+  override prependListener(event: string | symbol, listener: Listener): this {
+    if (!this.listenerCount(event))
+      this._updateSubscription(event, true);
+    super.prependListener(event, listener);
+    return this;
+  }
+
+  override off(event: string | symbol, listener: Listener): this {
+    super.off(event, listener);
+    if (!this.listenerCount(event))
+      this._updateSubscription(event, false);
+    return this;
+  }
+
+  override removeListener(event: string | symbol, listener: Listener): this {
+    super.removeListener(event, listener);
+    if (!this.listenerCount(event))
+      this._updateSubscription(event, false);
+    return this;
+  }
+
+  _adopt(child: ChannelOwner<any>) {
+    child._parent!._objects.delete(child._guid);
+    this._objects.set(child._guid, child);
+    child._parent = this;
+  }
+
+  _dispose(reason: 'gc' | undefined) {
     // Clean up from parent and connection.
     if (this._parent)
       this._parent._objects.delete(this._guid);
     this._connection._objects.delete(this._guid);
+    this._wasCollected = reason === 'gc';
 
     // Dispose all children.
     for (const object of [...this._objects.values()])
-      object._dispose();
+      object._dispose(reason);
     this._objects.clear();
   }
 
@@ -77,19 +137,21 @@ export abstract class ChannelOwner<T extends channels.Channel = channels.Channel
 
   private _createChannel(base: Object): T {
     const channel = new Proxy(base, {
-      get: (obj: any, prop) => {
-        if (prop === 'debugScopeState')
-          return (params: any) => this._connection.sendMessageToServer(this, prop, params, null);
+      get: (obj: any, prop: string | symbol) => {
         if (typeof prop === 'string') {
-          const validator = scheme[paramsName(this._type, prop)];
+          const validator = maybeFindValidator(this._type, prop, 'Params');
           if (validator) {
-            return (params: any) => {
-              return this._wrapApiCall(apiZone => {
-                const { stackTrace, csi, callCookie } = apiZone.reported ? { csi: undefined, callCookie: undefined, stackTrace: null } : apiZone;
+            return async (params: any) => {
+              return await this._wrapApiCall(async apiZone => {
+                const { apiName, frames, csi, callCookie, stepId } = apiZone.reported ? { apiName: undefined, csi: undefined, callCookie: undefined, frames: [], stepId: undefined } : apiZone;
                 apiZone.reported = true;
-                if (csi && stackTrace && stackTrace.apiName)
-                  csi.onApiCallBegin(renderCallWithParams(stackTrace.apiName, params), stackTrace, callCookie);
-                return this._connection.sendMessageToServer(this, prop, validator(params, ''), stackTrace);
+                let currentStepId = stepId;
+                if (csi && apiName) {
+                  const out: { stepId?: string } = {};
+                  csi.onApiCallBegin(apiName, params, frames, callCookie, out);
+                  currentStepId = out.stepId;
+                }
+                return await this._connection.sendMessageToServer(this, prop, validator(params, '', { tChannelImpl: tChannelImplToWire, binary: this._connection.rawBuffers() ? 'buffer' : 'toBase64' }), apiName, frames, currentStepId);
               });
             };
           }
@@ -103,36 +165,53 @@ export abstract class ChannelOwner<T extends channels.Channel = channels.Channel
 
   async _wrapApiCall<R>(func: (apiZone: ApiZone) => Promise<R>, isInternal = false): Promise<R> {
     const logger = this._logger;
-    const stack = captureRawStack();
-    const apiZone = zones.zoneData<ApiZone>('apiZone', stack);
+    const apiZone = zones.zoneData<ApiZone>('apiZone');
     if (apiZone)
-      return func(apiZone);
+      return await func(apiZone);
 
-    const stackTrace = captureStackTrace(stack);
+    const stackTrace = captureLibraryStackTrace();
+    let apiName: string | undefined = stackTrace.apiName;
+    const frames: channels.StackFrame[] = stackTrace.frames;
+
+    isInternal = isInternal || this._type === 'LocalUtils';
     if (isInternal)
-      delete stackTrace.apiName;
-    const csi = isInternal ? undefined : this._instrumentation;
-    const callCookie: any = {};
+      apiName = undefined;
 
-    const { apiName, frameTexts } = stackTrace;
+    // Enclosing zone could have provided the apiName and wallTime.
+    const expectZone = zones.zoneData<ExpectZone>('expectZone');
+    const stepId = expectZone?.stepId;
+    if (!isInternal && expectZone)
+      apiName = expectZone.title;
+
+    // If we are coming from the expectZone, there is no need to generate a new
+    // step for the API call, since it will be generated by the expect itself.
+    const csi = isInternal || expectZone ? undefined : this._instrumentation;
+    const callCookie: any = {};
 
     try {
       logApiCall(logger, `=> ${apiName} started`, isInternal);
-      const apiZone = { stackTrace, isInternal, reported: false, csi, callCookie };
-      const result = await zones.run<ApiZone, R>('apiZone', apiZone, async () => {
-        return await func(apiZone);
-      });
+      const apiZone: ApiZone = { apiName, frames, isInternal, reported: false, csi, callCookie, stepId };
+      const result = await zones.run('apiZone', apiZone, async () => await func(apiZone));
       csi?.onApiCallEnd(callCookie);
       logApiCall(logger, `<= ${apiName} succeeded`, isInternal);
       return result;
     } catch (e) {
       const innerError = ((process.env.PWDEBUGIMPL || isUnderTest()) && e.stack) ? '\n<inner error>\n' + e.stack : '';
-      e.message = apiName + ': ' + e.message;
-      e.stack = e.message + '\n' + frameTexts.join('\n') + innerError;
+      if (apiName && !apiName.includes('<anonymous>'))
+        e.message = apiName + ': ' + e.message;
+      const stackFrames = '\n' + stringifyStackFrames(stackTrace.frames).join('\n') + innerError;
+      if (stackFrames.trim())
+        e.stack = e.message + stackFrames;
+      else
+        e.stack = '';
       csi?.onApiCallEnd(callCookie, e);
       logApiCall(logger, `<= ${apiName} failed`, isInternal);
       throw e;
     }
+  }
+
+  _toImpl(): any {
+    return this._connection.toImpl?.(this);
   }
 
   private toJSON() {
@@ -155,37 +234,18 @@ function logApiCall(logger: Logger | undefined, message: string, isNested: boole
   debugLogger.log('api', message);
 }
 
-function paramsName(type: string, method: string) {
-  return type + method[0].toUpperCase() + method.substring(1) + 'Params';
+function tChannelImplToWire(names: '*' | string[], arg: any, path: string, context: ValidatorContext) {
+  if (arg._object instanceof ChannelOwner && (names === '*' || names.includes(arg._object._type)))
+    return { guid: arg._object._guid };
+  throw new ValidationError(`${path}: expected channel ${names.toString()}`);
 }
-
-const paramsToRender = ['url', 'selector', 'text', 'key'];
-export function renderCallWithParams(apiName: string, params: any) {
-  const paramsArray = [];
-  if (params) {
-    for (const name of paramsToRender) {
-      if (params[name])
-        paramsArray.push(params[name]);
-    }
-  }
-  const paramsText = paramsArray.length ? '(' + paramsArray.join(', ') + ')' : '';
-  return apiName + paramsText;
-}
-
-const tChannel = (name: string): Validator => {
-  return (arg: any, path: string) => {
-    if (arg._object instanceof ChannelOwner && (name === '*' || arg._object._type === name))
-      return { guid: arg._object._guid };
-    throw new ValidationError(`${path}: expected ${name}`);
-  };
-};
-
-const scheme = createScheme(tChannel);
 
 type ApiZone = {
-  stackTrace: ParsedStackTrace;
+  apiName: string | undefined;
+  frames: channels.StackFrame[];
   isInternal: boolean;
   reported: boolean;
   csi: ClientInstrumentation | undefined;
   callCookie: any;
+  stepId?: string;
 };

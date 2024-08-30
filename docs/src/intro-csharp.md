@@ -1,145 +1,193 @@
 ---
 id: intro
-title: "Getting started"
+title: "Installation"
 ---
 
-<!-- TOC -->
-- [Release notes](./release-notes.md)
+## Introduction
 
-## First project
+Playwright was created specifically to accommodate the needs of end-to-end testing. Playwright supports all modern rendering engines including Chromium, WebKit, and Firefox. Test on Windows, Linux, and macOS, locally or on CI, headless or headed with native mobile emulation.
 
-Create a console project and add the Playwright dependency.
+You can choose to use [MSTest base classes](./test-runners.md#mstest) or [NUnit base classes](./test-runners.md#nunit) that Playwright provides to write end-to-end tests. These classes support running tests on multiple browser engines, parallelizing tests, adjusting launch/context options and getting a [Page]/[BrowserContext] instance per test out of the box. Alternatively you can use the [library](./library.md) to manually write the testing infrastructure.
 
-```bash
-# Create project
-dotnet new console -n PlaywrightDemo
-cd PlaywrightDemo
+1. Start by creating a new project with `dotnet new`. This will create the `PlaywrightTests` directory which includes a `UnitTest1.cs` file:
 
-# Add project dependency
-dotnet add package Microsoft.Playwright
-# Build the project
-dotnet build
-# Install required browsers
-pwsh bin\Debug\netX\playwright.ps1 install
-```
-
-Create a `Program.cs` that will navigate to `https://playwright.dev/dotnet` and take a screenshot in Chromium.
-
-```csharp
-using Microsoft.Playwright;
-using System.Threading.Tasks;
-
-class Program
-{
-    public static async Task Main()
-    {
-        using var playwright = await Playwright.CreateAsync();
-        await using var browser = await playwright.Chromium.LaunchAsync();
-        var page = await browser.NewPageAsync();
-        await page.GotoAsync("https://playwright.dev/dotnet");
-        await page.ScreenshotAsync(new PageScreenshotOptions { Path = "screenshot.png" });
-    }
-}
-```
-
-Now run it.
+<Tabs
+  groupId="test-runners"
+  defaultValue="mstest"
+  values={[
+    {label: 'MSTest', value: 'mstest'},
+    {label: 'NUnit', value: 'nunit'},
+  ]
+}>
+<TabItem value="nunit">
 
 ```bash
-dotnet run
-```
-
-By default, Playwright runs the browsers in headless mode. To see the browser UI, pass the `Headless = false` flag while launching the browser. You can also use [`option: slowMo`] to slow down execution. Learn more in the debugging tools [section](./debug.md).
-
-```csharp
-await playwright.Firefox.LaunchAsync(new BrowserTypeLaunchOptions 
-{ 
-    Headless = false, 
-    SlowMo = 50, 
-});
-```
-
-## First test
-
-You can choose to use NUnit test fixtures that come bundled with Playwright. These fixtures support running tests on multiple browser engines in parallel, out of the box. Learn more about [Playwright with NUnit](./test-runners.md).
-
-```bash
-# Create new project.
 dotnet new nunit -n PlaywrightTests
 cd PlaywrightTests
 ```
 
-Install dependencies, build project and download necessary browsers. This is only done once per project.
+</TabItem>
+<TabItem value="mstest">
 
 ```bash
-# Add project dependency
-dotnet add package Microsoft.Playwright.NUnit
-# Build the project
-dotnet build
-# Install required browsers
-pwsh bin\Debug\netX\playwright.ps1 install
+dotnet new mstest -n PlaywrightTests
+cd PlaywrightTests
 ```
 
-Edit UnitTest1.cs file.
-```csharp
+</TabItem>
+</Tabs>
+
+2. Install the necessary Playwright dependencies:
+
+<Tabs
+  groupId="test-runners"
+  defaultValue="mstest"
+  values={[
+    {label: 'MSTest', value: 'mstest'},
+    {label: 'NUnit', value: 'nunit'},
+  ]
+}>
+<TabItem value="nunit">
+
+```bash
+dotnet add package Microsoft.Playwright.NUnit
+```
+
+</TabItem>
+<TabItem value="mstest">
+
+```bash
+dotnet add package Microsoft.Playwright.MSTest
+```
+
+</TabItem>
+</Tabs>
+
+3. Build the project so the `playwright.ps1` is available inside the `bin` directory:
+
+```bash
+dotnet build
+```
+
+1. Install required browsers. This example uses `net8.0`, if you are using a different version of .NET you will need to adjust the command and change `net8.0` to your version.
+
+```bash
+pwsh bin/Debug/net8.0/playwright.ps1 install
+```
+
+If `pwsh` is not available, you will have to [install PowerShell](https://docs.microsoft.com/powershell/scripting/install/installing-powershell).
+
+## Add Example Tests
+
+Edit the `UnitTest1.cs` file with the code below to create an example end-to-end test:
+
+<Tabs
+  groupId="test-runners"
+  defaultValue="mstest"
+  values={[
+    {label: 'MSTest', value: 'mstest'},
+    {label: 'NUnit', value: 'nunit'},
+  ]
+}>
+<TabItem value="nunit">
+
+```csharp title="UnitTest1.cs"
+using System.Text.RegularExpressions;
 using System.Threading.Tasks;
+using Microsoft.Playwright;
 using Microsoft.Playwright.NUnit;
 using NUnit.Framework;
 
-namespace PlaywrightTests
-{
-    [Parallelizable(ParallelScope.Self)]
-    public class Tests : PageTest
-    {
-        [Test]
-        public async Task ShouldAdd()
-        {
-            int result = await Page.EvaluateAsync<int>("() => 7 + 3");
-            Assert.AreEqual(10, result);
-        }
+namespace PlaywrightTests;
 
-        [Test]
-        public async Task ShouldMultiply()
-        {
-            int result = await Page.EvaluateAsync<int>("() => 7 * 3");
-            Assert.AreEqual(21, result);
-        }
+[Parallelizable(ParallelScope.Self)]
+[TestFixture]
+public class ExampleTest : PageTest
+{
+    [Test]
+    public async Task HasTitle()
+    {
+        await Page.GotoAsync("https://playwright.dev");
+
+        // Expect a title "to contain" a substring.
+        await Expect(Page).ToHaveTitleAsync(new Regex("Playwright"));
     }
+
+    [Test]
+    public async Task GetStartedLink()
+    {
+        await Page.GotoAsync("https://playwright.dev");
+
+        // Click the get started link.
+        await Page.GetByRole(AriaRole.Link, new() { Name = "Get started" }).ClickAsync();
+
+        // Expects page to have a heading with the name of Installation.
+        await Expect(Page.GetByRole(AriaRole.Heading, new() { Name = "Installation" })).ToBeVisibleAsync();
+    } 
 }
 ```
 
-```bash
-dotnet test -- NUnit.NumberOfTestWorkers=5
+</TabItem>
+<TabItem value="mstest">
+
+```csharp title="UnitTest1.cs"
+using System.Text.RegularExpressions;
+using Microsoft.Playwright;
+using Microsoft.Playwright.MSTest;
+
+namespace PlaywrightTests;
+
+[TestClass]
+public class ExampleTest : PageTest
+{
+    [TestMethod]
+    public async Task HasTitle()
+    {
+        await Page.GotoAsync("https://playwright.dev");
+
+        // Expect a title "to contain" a substring.
+        await Expect(Page).ToHaveTitleAsync(new Regex("Playwright"));
+    }
+
+    [TestMethod]
+    public async Task GetStartedLink()
+    {
+        await Page.GotoAsync("https://playwright.dev");
+
+        // Click the get started link.
+        await Page.GetByRole(AriaRole.Link, new() { Name = "Get started" }).ClickAsync();
+
+        // Expects page to have a heading with the name of Installation.
+        await Expect(Page.GetByRole(AriaRole.Heading, new() { Name = "Installation" })).ToBeVisibleAsync();
+    } 
+}
 ```
 
-## Record scripts
+</TabItem>
+</Tabs>
 
-[Command line tools](./cli.md) can be used to record user interactions and generate C# code.
+## Running the Example Tests
+
+By default tests will be run on Chromium. This can be configured via the `BROWSER` environment variable, or by adjusting the [launch configuration options](./running-tests.md). Tests are run in headless mode meaning no browser will open up when running the tests. Results of the tests and test logs will be shown in the terminal.
 
 ```bash
-pwsh bin\Debug\netX\playwright.ps1 codegen
+dotnet test
 ```
+
+See our doc on [Running and Debugging Tests](./running-tests.md) to learn more about running tests in headed mode, running multiple tests, running specific configurations etc.
 
 ## System requirements
 
-The browser binaries for Chromium, Firefox and WebKit work across the 3 platforms (Windows, macOS, Linux):
+- Playwright is distributed as a .NET Standard 2.0 library. We recommend .NET 8.
+- Windows 10+, Windows Server 2016+ or Windows Subsystem for Linux (WSL).
+- macOS 13 Ventura, or macOS 14 Sonoma.
+- Debian 11, Debian 12, Ubuntu 20.04 or Ubuntu 22.04, Ubuntu 24.04, on x86-64 and arm64 architecture.
 
-### Windows
+## What's next
 
-Works with Windows and Windows Subsystem for Linux (WSL).
-
-### macOS
-
-Requires 10.14 (Mojave) or above.
-
-### Linux
-
-Depending on your Linux distribution, you might need to install additional
-dependencies to run the browsers.
-
-:::note
-Only Ubuntu 18.04 and Ubuntu 20.04 are officially supported.
-:::
-
-See also in the [Command line tools](./cli.md#install-system-dependencies)
-which has a command to install all necessary dependencies automatically for Ubuntu
-LTS releases.
+- [Write tests using web first assertions, page fixtures and locators](./writing-tests.md)
+- [Run single test, multiple tests, headed mode](./running-tests.md)
+- [Generate tests with Codegen](./codegen-intro.md)
+- [See a trace of your tests](./trace-viewer-intro.md)
+- [Run tests on CI](./ci-intro.md)
+- [Learn more about the MSTest and NUnit base classes](./test-runners.md)

@@ -3,17 +3,17 @@ id: test-runners
 title: "Test Runners"
 ---
 
+## Introduction
+
 With a few lines of code, you can hook up Playwright to your favorite Java test runner.
 
 Playwright and Browser instances can be reused between tests for better performance. We
 recommend running each test case in a new BrowserContext, this way browser state will be
 isolated between the tests.
 
-<!-- TOC -->
-
 ## JUnit
 
-In JUnit you can initialize [Playwright] and [Browser] in [@BeforeAll](https://junit.org/junit5/docs/current/api/org.junit.jupiter.api/org/junit/jupiter/api/BeforeAll.html) method and
+In [JUnit](https://junit.org/junit5/) you can initialize [Playwright] and [Browser] in [@BeforeAll](https://junit.org/junit5/docs/current/api/org.junit.jupiter.api/org/junit/jupiter/api/BeforeAll.html) method and
 destroy them in [@AfterAll](https://junit.org/junit5/docs/current/api/org.junit.jupiter.api/org/junit/jupiter/api/AfterAll.html). In the example below all three test methods use the same
 [Browser]. Each test uses its own [BrowserContext] and [Page].
 
@@ -63,27 +63,29 @@ public class TestExample {
   @Test
   void shouldClickButton() {
     page.navigate("data:text/html,<script>var result;</script><button onclick='result=\"Clicked\"'>Go</button>");
-    page.click("button");
+    page.locator("button").click();
     assertEquals("Clicked", page.evaluate("result"));
   }
 
   @Test
   void shouldCheckTheBox() {
     page.setContent("<input id='checkbox' type='checkbox'></input>");
-    page.check("input");
+    page.locator("input").check();
     assertTrue((Boolean) page.evaluate("() => window['checkbox'].checked"));
   }
 
   @Test
   void shouldSearchWiki() {
     page.navigate("https://www.wikipedia.org/");
-    page.click("input[name=\"search\"]");
-    page.fill("input[name=\"search\"]", "playwright");
-    page.press("input[name=\"search\"]", "Enter");
+    page.locator("input[name=\"search\"]").click();
+    page.locator("input[name=\"search\"]").fill("playwright");
+    page.locator("input[name=\"search\"]").press("Enter");
     assertEquals("https://en.wikipedia.org/wiki/Playwright", page.url());
   }
 }
 ```
+
+See experimental [JUnit integration](./junit.md) to automatically initialize Playwright objects and more.
 
 ### Running Tests in Parallel
 
@@ -94,7 +96,7 @@ instance per thread and use it on that thread exclusively. Here is an example ho
 
 Use [`@TestInstance(TestInstance.Lifecycle.PER_CLASS)`](https://junit.org/junit5/docs/current/api/org.junit.jupiter.api/org/junit/jupiter/api/TestInstance.html)
 annotation to make JUnit create one instance of a class for all test methods within that class (by default each JUnit will create a new instance of the class
-for each test method). Store [Playwright] and [Browser] objects in instance fields. They will be shared between tests. Each instace of the class will use its
+for each test method). Store [Playwright] and [Browser] objects in instance fields. They will be shared between tests. Each instance of the class will use its
 own copy of Playwright.
 
 
@@ -137,23 +139,23 @@ class Test1 extends TestFixtures {
   @Test
   void shouldClickButton() {
     page.navigate("data:text/html,<script>var result;</script><button onclick='result=\"Clicked\"'>Go</button>");
-    page.click("button");
+    page.locator("button").click();
     assertEquals("Clicked", page.evaluate("result"));
   }
 
   @Test
   void shouldCheckTheBox() {
     page.setContent("<input id='checkbox' type='checkbox'></input>");
-    page.check("input");
+    page.locator("input").check();
     assertTrue((Boolean) page.evaluate("() => window['checkbox'].checked"));
   }
 
   @Test
   void shouldSearchWiki() {
     page.navigate("https://www.wikipedia.org/");
-    page.click("input[name=\"search\"]");
-    page.fill("input[name=\"search\"]", "playwright");
-    page.press("input[name=\"search\"]", "Enter");
+    page.locator("input[name=\"search\"]").click();
+    page.locator("input[name=\"search\"]").fill("playwright");
+    page.locator("input[name=\"search\"]").press("Enter");
     assertEquals("https://en.wikipedia.org/wiki/Playwright", page.url());
   }
 }
@@ -185,4 +187,170 @@ junit.jupiter.execution.parallel.mode.default = same_thread
 junit.jupiter.execution.parallel.mode.classes.default = concurrent
 junit.jupiter.execution.parallel.config.strategy=dynamic
 junit.jupiter.execution.parallel.config.dynamic.factor=0.5
+```
+
+### Using Gradle
+
+You can use a Gradle build configuration script, written in Groovy or Kotlin.
+
+<Tabs
+  defaultValue="gradle"
+  values={[
+    {label: 'build.gradle', value: 'gradle'},
+    {label: 'build.gradle.kts', value: 'gradle-kotlin'}
+  ]
+}>
+<TabItem value="gradle">
+
+```java
+plugins {
+  application
+  id 'java'
+}
+
+repositories {
+  mavenCentral()
+}
+
+dependencies {
+  implementation 'com.microsoft.playwright:playwright:%%VERSION%%'
+}
+
+application {
+  mainClass = 'org.example.App'
+}
+
+// Usage: ./gradlew playwright --args="help"
+task playwright(type: JavaExec) {
+  classpath sourceSets.test.runtimeClasspath
+  mainClass = 'com.microsoft.playwright.CLI'
+}
+
+test {
+  useJUnitPlatform()
+}
+```
+
+</TabItem>
+<TabItem value="gradle-kotlin">
+
+```java
+plugins {
+  application
+  id("java")
+}
+
+repositories {
+  mavenCentral()
+}
+
+dependencies {
+  implementation("com.microsoft.playwright:playwright:%%VERSION%%")
+}
+
+application {
+  mainClass.set("org.example.App")
+}
+
+// Usage: ./gradlew playwright --args="help"
+tasks.register<JavaExec>("playwright") {
+  classpath(sourceSets["test"].runtimeClasspath)
+  mainClass.set("com.microsoft.playwright.CLI")
+}
+
+tasks.test {
+  useJUnitPlatform()
+  testLogging {
+    events("passed", "skipped", "failed")
+  }
+}
+```
+
+</TabItem>
+</Tabs>
+
+Tests can then be launched as follows:
+
+```bash
+./gradlew run
+```
+
+Also, Playwright command line tools can be run with :
+
+```bash
+./gradlew playwright --args="help"
+```
+
+## TestNG
+
+In [TestNG](https://testng.org/) you can initialize [Playwright] and [Browser] in [@BeforeClass](https://javadoc.io/doc/org.testng/testng/latest/org/testng/annotations/BeforeClass.html) method and
+destroy them in [@AfterClass](https://javadoc.io/doc/org.testng/testng/latest/org/testng/annotations/AfterClass.html). In the example below all three test methods use the same
+[Browser]. Each test uses its own [BrowserContext] and [Page].
+
+```java
+package org.example;
+
+import com.microsoft.playwright.Browser;
+import com.microsoft.playwright.BrowserContext;
+import com.microsoft.playwright.Page;
+import com.microsoft.playwright.Playwright;
+import org.testng.annotations.*;
+
+import static org.testng.Assert.assertEquals;
+import static org.testng.Assert.assertTrue;
+
+public class TestExample {
+  // Shared between all tests in this class.
+  Playwright playwright;
+  Browser browser;
+
+  // New instance for each test method.
+  BrowserContext context;
+  Page page;
+
+  @BeforeClass
+  void launchBrowser() {
+    playwright = Playwright.create();
+    browser = playwright.chromium().launch();
+  }
+
+  @AfterClass
+  void closeBrowser() {
+    playwright.close();
+  }
+
+  @BeforeMethod
+  void createContextAndPage() {
+    context = browser.newContext();
+    page = context.newPage();
+  }
+
+  @AfterMethod
+  void closeContext() {
+    context.close();
+  }
+
+  @Test
+  void shouldClickButton() {
+    page.navigate("data:text/html,<script>var result;</script><button onclick='result=\"Clicked\"'>Go</button>");
+    page.locator("button").click();
+    assertEquals("Clicked", page.evaluate("result"));
+  }
+
+  @Test
+  void shouldCheckTheBox() {
+    page.setContent("<input id='checkbox' type='checkbox'></input>");
+    page.locator("input").check();
+    assertTrue((Boolean) page.evaluate("() => window['checkbox'].checked"));
+  }
+
+  @Test
+  void shouldSearchWiki() {
+    page.navigate("https://www.wikipedia.org/");
+    page.locator("input[name=\"search\"]").click();
+    page.locator("input[name=\"search\"]").fill("playwright");
+    page.locator("input[name=\"search\"]").press("Enter");
+    assertEquals("https://en.wikipedia.org/wiki/Playwright", page.url());
+  }
+}
 ```

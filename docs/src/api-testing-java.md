@@ -3,18 +3,18 @@ id: api-testing
 title: "API testing"
 ---
 
+## Introduction
+
 Playwright can be used to get access to the [REST](https://en.wikipedia.org/wiki/Representational_state_transfer) API of
 your application.
 
-Sometimes you may want to send requests to the server directly from Node.js without loading a page and running js code in it.
+Sometimes you may want to send requests to the server directly from Java without loading a page and running js code in it.
 A few examples where it may come in handy:
 - Test your server API.
 - Prepare server side state before visiting the web application in a test.
 - Validate server side post-conditions after running some actions in the browser.
 
 All of that could be achieved via [APIRequestContext] methods.
-
-<!-- TOC -->
 
 ## Writing API Test
 
@@ -373,6 +373,8 @@ public class TestGitHubAPI {
 }
 ```
 
+See experimental [JUnit integration](./junit.md) to automatically initialize Playwright objects and more.
+
 ## Prepare server state via API calls
 
 The following test creates a new issue via API and then navigates to the list of all issues in the
@@ -403,10 +405,10 @@ it was created:
 @Test
 void lastCreatedIssueShouldBeOnTheServer() {
   page.navigate("https://github.com/" + USER + "/" + REPO + "/issues");
-  page.click("text=New Issue");
-  page.fill("[aria-label='Title']", "Bug report 1");
-  page.fill("[aria-label='Comment body']", "Bug description");
-  page.click("text=Submit new issue");
+  page.locator("text=New Issue").click();
+  page.locator("[aria-label='Title']").fill("Bug report 1");
+  page.locator("[aria-label='Comment body']").fill("Bug description");
+  page.locator("text=Submit new issue").click();
   String issueId = page.url().substring(page.url().lastIndexOf('/'));
 
   APIResponse newIssue = request.get("https://github.com/" + USER + "/" + REPO + "/issues/" + issueId);

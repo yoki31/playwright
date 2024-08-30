@@ -14,127 +14,118 @@
  * limitations under the License.
  */
 
-import debug from 'debug';
-import * as http from 'http';
-import * as ws from 'ws';
-import { DispatcherConnection, Root } from '../dispatchers/dispatcher';
-import { PlaywrightDispatcher } from '../dispatchers/playwrightDispatcher';
-import { createPlaywright, Playwright } from '../server/playwright';
-import { gracefullyCloseAll } from '../utils/processLauncher';
+import type { Browser } from '../server/browser';
+import type { Playwright } from '../server/playwright';
+import { createPlaywright } from '../server/playwright';
+import { PlaywrightConnection } from './playwrightConnection';
+import type { ClientType } from './playwrightConnection';
+import type  { LaunchOptions } from '../server/types';
+import { Semaphore } from '../utils/semaphore';
+import type { AndroidDevice } from '../server/android/android';
+import type { SocksProxy } from '../common/socksProxy';
+import { debugLogger } from '../utils/debugLogger';
+import { userAgentVersionMatchesErrorMessage } from '../utils';
+import { WSServer } from '../utils/wsServer';
 
-const debugLog = debug('pw:server');
-
-export interface PlaywrightServerDelegate {
+type ServerOptions = {
   path: string;
-  allowMultipleClients: boolean;
-  onConnect(connection: DispatcherConnection, forceDisconnect: () => void): Promise<() => any>;
-  onClose: () => any;
-}
+  maxConnections: number;
+  mode: 'default' | 'launchServer' | 'extension';
+  preLaunchedBrowser?: Browser;
+  preLaunchedAndroidDevice?: AndroidDevice;
+  preLaunchedSocksProxy?: SocksProxy;
+};
 
 export class PlaywrightServer {
-  private _wsServer: ws.Server | undefined;
-  private _clientsCount = 0;
-  private _delegate: PlaywrightServerDelegate;
+  private _preLaunchedPlaywright: Playwright | undefined;
+  private _options: ServerOptions;
+  private _wsServer: WSServer;
 
-  static async startDefault(): Promise<PlaywrightServer> {
-    const cleanup = async () => {
-      await gracefullyCloseAll().catch(e => {});
-    };
-    const delegate: PlaywrightServerDelegate = {
-      path: '/ws',
-      allowMultipleClients: false,
-      onClose: cleanup,
-      onConnect: async (connection: DispatcherConnection) => {
-        let playwright: Playwright | undefined;
-        new Root(connection, async (rootScope): Promise<PlaywrightDispatcher> => {
-          playwright = createPlaywright('javascript');
-          const dispatcher = new PlaywrightDispatcher(rootScope, playwright);
-          if (process.env.PW_SOCKS_PROXY_PORT)
-            await dispatcher.enableSocksProxy();
-          return dispatcher;
-        });
-        return () => {
-          cleanup();
-          playwright?.selectors.unregisterAll();
-        };
+  constructor(options: ServerOptions) {
+    this._options = options;
+    if (options.preLaunchedBrowser)
+      this._preLaunchedPlaywright = options.preLaunchedBrowser.attribution.playwright;
+    if (options.preLaunchedAndroidDevice)
+      this._preLaunchedPlaywright = options.preLaunchedAndroidDevice._android.attribution.playwright;
+
+    const browserSemaphore = new Semaphore(this._options.maxConnections);
+    const controllerSemaphore = new Semaphore(1);
+    const reuseBrowserSemaphore = new Semaphore(1);
+
+    this._wsServer = new WSServer({
+      onUpgrade: (request, socket) => {
+        const uaError = userAgentVersionMatchesErrorMessage(request.headers['user-agent'] || '');
+        if (uaError)
+          return { error: `HTTP/${request.httpVersion} 428 Precondition Required\r\n\r\n${uaError}` };
       },
-    };
-    return new PlaywrightServer(delegate);
-  }
 
-  constructor(delegate: PlaywrightServerDelegate) {
-    this._delegate = delegate;
-  }
+      onHeaders: headers => {
+        if (process.env.PWTEST_SERVER_WS_HEADERS)
+          headers.push(process.env.PWTEST_SERVER_WS_HEADERS!);
+      },
 
-  async listen(port: number = 0): Promise<string> {
-    const server = http.createServer((request, response) => {
-      response.end('Running');
-    });
-    server.on('error', error => debugLog(error));
+      onConnection: (request, url, ws, id) => {
+        const browserHeader = request.headers['x-playwright-browser'];
+        const browserName = url.searchParams.get('browser') || (Array.isArray(browserHeader) ? browserHeader[0] : browserHeader) || null;
+        const proxyHeader = request.headers['x-playwright-proxy'];
+        const proxyValue = url.searchParams.get('proxy') || (Array.isArray(proxyHeader) ? proxyHeader[0] : proxyHeader);
 
-    const path = this._delegate.path;
-    const wsEndpoint = await new Promise<string>((resolve, reject) => {
-      server.listen(port, () => {
-        const address = server.address();
-        if (!address) {
-          reject(new Error('Could not bind server socket'));
-          return;
+        const launchOptionsHeader = request.headers['x-playwright-launch-options'] || '';
+        const launchOptionsHeaderValue = Array.isArray(launchOptionsHeader) ? launchOptionsHeader[0] : launchOptionsHeader;
+        const launchOptionsParam = url.searchParams.get('launch-options');
+        let launchOptions: LaunchOptions = {};
+        try {
+          launchOptions = JSON.parse(launchOptionsParam || launchOptionsHeaderValue);
+        } catch (e) {
         }
-        const wsEndpoint = typeof address === 'string' ? `${address}${path}` : `ws://127.0.0.1:${address.port}${path}`;
-        resolve(wsEndpoint);
-      }).on('error', reject);
-    });
 
-    debugLog('Listening at ' + wsEndpoint);
+        // Instantiate playwright for the extension modes.
+        const isExtension = this._options.mode === 'extension';
+        if (isExtension) {
+          if (!this._preLaunchedPlaywright)
+            this._preLaunchedPlaywright = createPlaywright({ sdkLanguage: 'javascript', isServer: true });
+        }
 
-    this._wsServer = new ws.Server({ server, path });
-    this._wsServer.on('connection', async socket => {
-      if (this._clientsCount && !this._delegate.allowMultipleClients) {
-        socket.close();
-        return;
+        let clientType: ClientType = 'launch-browser';
+        let semaphore: Semaphore = browserSemaphore;
+        if (isExtension && url.searchParams.has('debug-controller')) {
+          clientType = 'controller';
+          semaphore = controllerSemaphore;
+        } else if (isExtension) {
+          clientType = 'reuse-browser';
+          semaphore = reuseBrowserSemaphore;
+        } else if (this._options.mode === 'launchServer') {
+          clientType = 'pre-launched-browser-or-android';
+          semaphore = browserSemaphore;
+        }
+
+        return new PlaywrightConnection(
+            semaphore.acquire(),
+            clientType, ws,
+            { socksProxyPattern: proxyValue, browserName, launchOptions },
+            {
+              playwright: this._preLaunchedPlaywright,
+              browser: this._options.preLaunchedBrowser,
+              androidDevice: this._options.preLaunchedAndroidDevice,
+              socksProxy: this._options.preLaunchedSocksProxy,
+            },
+            id, () => semaphore.release());
+      },
+
+      onClose: async () => {
+        debugLogger.log('server', 'closing browsers');
+        if (this._preLaunchedPlaywright)
+          await Promise.all(this._preLaunchedPlaywright.allBrowsers().map(browser => browser.close({ reason: 'Playwright Server stopped' })));
+        debugLogger.log('server', 'closed browsers');
       }
-      this._clientsCount++;
-      debugLog('Incoming connection');
-
-      const connection = new DispatcherConnection();
-      connection.onmessage = message => {
-        if (socket.readyState !== ws.CLOSING)
-          socket.send(JSON.stringify(message));
-      };
-      socket.on('message', (message: string) => {
-        connection.dispatch(JSON.parse(Buffer.from(message).toString()));
-      });
-
-      const forceDisconnect = () => socket.close();
-      let onDisconnect = () => {};
-      const disconnected = () => {
-        this._clientsCount--;
-        // Avoid sending any more messages over closed socket.
-        connection.onmessage = () => {};
-        onDisconnect();
-      };
-      socket.on('close', () => {
-        debugLog('Client closed');
-        disconnected();
-      });
-      socket.on('error', error => {
-        debugLog('Client error ' + error);
-        disconnected();
-      });
-      onDisconnect = await this._delegate.onConnect(connection, forceDisconnect);
     });
+  }
 
-    return wsEndpoint;
+  async listen(port: number = 0, hostname?: string): Promise<string> {
+    return this._wsServer.listen(port, hostname, this._options.path);
   }
 
   async close() {
-    if (!this._wsServer)
-      return;
-    debugLog('Closing server');
-    // First disconnect all remaining clients.
-    await new Promise(f => this._wsServer!.close(f));
-    await new Promise(f => this._wsServer!.options.server!.close(f));
-    this._wsServer = undefined;
-    await this._delegate.onClose();
+    await this._wsServer.close();
   }
 }

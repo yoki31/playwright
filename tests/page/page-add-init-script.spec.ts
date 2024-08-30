@@ -31,7 +31,7 @@ it('should work with a path', async ({ page, server, asset }) => {
   expect(await page.evaluate(() => window['result'])).toBe(123);
 });
 
-it('should work with content #smoke', async ({ page, server }) => {
+it('should work with content @smoke', async ({ page, server }) => {
   await page.addInitScript({ content: 'window["injected"] = 123' });
   await page.goto(server.PREFIX + '/tamperable.html');
   expect(await page.evaluate(() => window['result'])).toBe(123);
@@ -41,6 +41,13 @@ it('should throw without path and content', async ({ page }) => {
   // @ts-expect-error foo is not a real option of addInitScript
   const error = await page.addInitScript({ foo: 'bar' }).catch(e => e);
   expect(error.message).toContain('Either path or content property must be present');
+});
+
+it('should work with trailing comments', async ({ page, asset }) => {
+  await page.addInitScript({ content: '// comment' });
+  await page.addInitScript({ content: 'window.secret = 42;' });
+  await page.goto('data:text/html,<html></html>');
+  expect(await page.evaluate('secret')).toBe(42);
 });
 
 it('should support multiple scripts', async ({ page, server }) => {
@@ -75,4 +82,30 @@ it('should work after a cross origin navigation', async ({ page, server }) => {
   });
   await page.goto(server.PREFIX + '/tamperable.html');
   expect(await page.evaluate(() => window['result'])).toBe(123);
+});
+
+it('init script should run only once in iframe', async ({ page, server, browserName }) => {
+  it.info().annotations.push({ type: 'issue', description: 'https://github.com/microsoft/playwright/issues/26992' });
+  const messages = [];
+  page.on('console', event => {
+    if (event.text().startsWith('init script:'))
+      messages.push(event.text());
+  });
+  await page.addInitScript(() => console.log('init script:', location.pathname || 'no url yet'));
+  await page.goto(server.PREFIX + '/frames/one-frame.html');
+  expect(messages).toEqual([
+    'init script: /frames/one-frame.html',
+    'init script: ' + (browserName === 'firefox' ? 'no url yet' : '/frames/frame.html'),
+  ]);
+});
+
+it('init script should run only once in popup', async ({ page, browserName }) => {
+  await page.context().addInitScript(() => {
+    window['callCount'] = (window['callCount'] || 0) + 1;
+  });
+  const [popup] = await Promise.all([
+    page.waitForEvent('popup'),
+    page.evaluate(() => window.open('about:blank')),
+  ]);
+  expect(await popup.evaluate('callCount')).toEqual(1);
 });

@@ -14,12 +14,14 @@
  * limitations under the License.
  */
 
-import { eventsHelper, RegisteredListener } from '../../utils/eventsHelper';
-import { Page, Worker } from '../page';
-import { Protocol } from './protocol';
+import type { RegisteredListener } from '../../utils/eventsHelper';
+import { eventsHelper } from '../../utils/eventsHelper';
+import type { Page } from '../page';
+import { Worker } from '../page';
+import type { Protocol } from './protocol';
 import { WKSession } from './wkConnection';
 import { WKExecutionContext } from './wkExecutionContext';
-import * as types from '../types';
+import type * as types from '../types';
 
 export class WKWorkers {
   private _sessionListeners: RegisteredListener[] = [];
@@ -36,7 +38,7 @@ export class WKWorkers {
     this._sessionListeners = [
       eventsHelper.addEventListener(session, 'Worker.workerCreated', (event: Protocol.Worker.workerCreatedPayload) => {
         const worker = new Worker(this._page, event.url);
-        const workerSession = new WKSession(session.connection, event.workerId, 'Most likely the worker has been closed.', (message: any) => {
+        const workerSession = new WKSession(session.connection, event.workerId, (message: any) => {
           session.send('Worker.sendMessageToWorker', {
             workerId: event.workerId,
             message: JSON.stringify(message)
@@ -67,7 +69,7 @@ export class WKWorkers {
         const workerSession = this._workerSessions.get(event.workerId)!;
         if (!workerSession)
           return;
-        workerSession.dispose(false);
+        workerSession.dispose();
         this._workerSessions.delete(event.workerId);
         this._page._removeWorker(event.workerId);
       })

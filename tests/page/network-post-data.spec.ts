@@ -16,8 +16,6 @@
 
 import { test as it, expect } from './pageTest';
 
-it.fixme(({ isAndroid }) => isAndroid, 'Post data  does not work');
-
 it('should return correct postData buffer for utf-8 body', async ({ page, server }) => {
   await page.goto(server.EMPTY_PAGE);
   const value = 'baẞ';
@@ -36,7 +34,7 @@ it('should return correct postData buffer for utf-8 body', async ({ page, server
   expect(request.postDataJSON()).toBe(value);
 });
 
-it('should return post data w/o content-type #smoke', async ({ page, server }) => {
+it('should return post data w/o content-type @smoke', async ({ page, server }) => {
   await page.goto(server.EMPTY_PAGE);
   const [request] = await Promise.all([
     page.waitForRequest('**'),
@@ -96,7 +94,7 @@ it('should get post data for file/blob', async ({ page, server, browserName }) =
     page.evaluate(() => {
       const file = new File(['file-contents'], 'filename.txt');
 
-      fetch('/data', {
+      void fetch('/data', {
         method: 'POST',
         headers: {
           'content-type': 'application/octet-stream'
@@ -106,4 +104,18 @@ it('should get post data for file/blob', async ({ page, server, browserName }) =
     })
   ]);
   expect(request.postData()).toBe('file-contents');
+});
+
+it('should get post data for navigator.sendBeacon api calls', async ({ page, server, browserName }) => {
+  it.info().annotations.push({ type: 'issue', description: 'https://github.com/microsoft/playwright/issues/12231' });
+  it.fail(browserName === 'chromium', 'postData is empty');
+  it.fail(browserName === 'webkit', 'postData is empty');
+  await page.goto(server.EMPTY_PAGE);
+  const [request] = await Promise.all([
+    page.waitForRequest('**/*'),
+    page.evaluate(() => navigator.sendBeacon(window.location.origin + '/api/foo', new Blob([JSON.stringify({ foo: 'bar' })])))
+  ]);
+  expect(request.method()).toBe('POST');
+  expect(request.url()).toBe(server.PREFIX + '/api/foo');
+  expect(request.postDataJSON()).toStrictEqual({ foo: 'bar' });
 });

@@ -14,13 +14,14 @@
  * limitations under the License.
  */
 
-import { ChildProcess } from 'child_process';
-import { assert, monotonicTime } from '../../utils/utils';
+import type { ChildProcess } from 'child_process';
+import { assert, monotonicTime } from '../../utils';
 import { Page } from '../page';
 import { launchProcess } from '../../utils/processLauncher';
-import { Progress, ProgressController } from '../progress';
-import { internalCallMetadata } from '../instrumentation';
-import * as types from '../types';
+import type { Progress } from '../progress';
+import { ProgressController } from '../progress';
+import { serverSideCallMetadata } from '../instrumentation';
+import type * as types from '../types';
 
 const fps = 25;
 
@@ -40,7 +41,7 @@ export class VideoRecorder {
     if (!options.outputFile.endsWith('.webm'))
       throw new Error('File must have .webm extension');
 
-    const controller = new ProgressController(internalCallMetadata(), page);
+    const controller = new ProgressController(serverSideCallMetadata(), page);
     controller.setLogName('browser');
     return await controller.run(async progress => {
       const recorder = new VideoRecorder(page, ffmpegPath, progress);
@@ -97,7 +98,7 @@ export class VideoRecorder {
 
     const w = options.width;
     const h = options.height;
-    const args = `-loglevel error -f image2pipe -avioflags direct -fpsprobesize 0 -probesize 32 -analyzeduration 0 -c:v mjpeg -i - -y -an -r ${fps} -c:v vp8 -qmin 0 -qmax 50 -crf 8 -deadline realtime -speed 8 -b:v 1M -threads 1 -vf pad=${w}:${h}:0:0:gray,crop=${w}:${h}:0:0`.split(' ');
+    const args = `-loglevel error -f image2pipe -avioflags direct -fpsprobesize 0 -probesize 32 -analyzeduration 0 -c:v mjpeg -i pipe:0 -y -an -r ${fps} -c:v vp8 -qmin 0 -qmax 50 -crf 8 -deadline realtime -speed 8 -b:v 1M -threads 1 -vf pad=${w}:${h}:0:0:gray,crop=${w}:${h}:0:0`.split(' ');
     args.push(options.outputFile);
     const progress = this._progress;
 
@@ -129,7 +130,6 @@ export class VideoRecorder {
     assert(this._process);
     if (this._isStopped)
       return;
-    this._progress.log(`writing frame ` + timestamp);
 
     if (this._lastFrameBuffer) {
       const durationSec = timestamp - this._lastFrameTimestamp;
@@ -152,7 +152,7 @@ export class VideoRecorder {
   private async _sendFrame(frame: Buffer) {
     return new Promise(f => this._process!.stdin!.write(frame, f)).then(error => {
       if (error)
-        this._progress.log(`ffmpeg failed to write: ${error}`);
+        this._progress.log(`ffmpeg failed to write: ${String(error)}`);
     });
   }
 

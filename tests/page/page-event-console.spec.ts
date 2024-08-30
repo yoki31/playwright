@@ -18,7 +18,7 @@
 import { test as it, expect } from './pageTest';
 import util from 'util';
 
-it('should work #smoke', async ({ page, browserName }) => {
+it('should work @smoke', async ({ page, browserName }) => {
   let message = null;
   page.once('console', m => message = m);
   await Promise.all([
@@ -38,7 +38,10 @@ it('should work #smoke', async ({ page, browserName }) => {
 it('should emit same log twice', async ({ page }) => {
   const messages = [];
   page.on('console', m => messages.push(m.text()));
-  await page.evaluate(() => { for (let i = 0; i < 2; ++i) console.log('hello'); });
+  await page.evaluate(() => {
+    for (let i = 0; i < 2; ++i)
+      console.log('hello');
+  });
   expect(messages).toEqual(['hello', 'hello']);
 });
 
@@ -94,9 +97,9 @@ it('should format the message correctly with time/timeLog/timeEnd', async ({ pag
   page.on('console', msg => messages.push(msg));
   await page.evaluate(async () => {
     console.time('foo time');
-    await new Promise(x => setTimeout(x, 100));
+    await new Promise(x => window.builtinSetTimeout(x, 100));
     console.timeLog('foo time');
-    await new Promise(x => setTimeout(x, 100));
+    await new Promise(x => window.builtinSetTimeout(x, 100));
     console.timeEnd('foo time');
   });
   expect(messages.length).toBe(2);
@@ -138,7 +141,7 @@ it('should trigger correct Log', async ({ page, server, browserName, isWindows }
 it('should have location for console API calls', async ({ page, server }) => {
   await page.goto(server.EMPTY_PAGE);
   const [message] = await Promise.all([
-    page.waitForEvent('console', m => m.text() === 'yellow'),
+    page.waitForEvent('console', m => m.text().startsWith('here:')),
     page.goto(server.PREFIX + '/consolelog.html'),
   ]);
   expect(message.type()).toBe('log');
@@ -183,7 +186,7 @@ it('should use object previews for arrays and objects', async ({ page, browserNa
   await page.evaluate(() => console.log([1, 2, 3], { a: 1 }, window));
 
   if (browserName !== 'firefox')
-    expect(text).toEqual('[1,2,3] {a: 1} Window');
+    expect(text).toEqual('[1, 2, 3] {a: 1} Window');
   else
     expect(text).toEqual('Array JSHandle@object JSHandle@object');
 });
@@ -200,4 +203,22 @@ it('should use object previews for errors', async ({ page, browserName }) => {
     expect(text).toEqual('Error: Exception');
   if (browserName === 'firefox')
     expect(text).toEqual('Error');
+});
+
+it('do not update console count on unhandled rejections', async ({ page }) => {
+  const messages: string[] = [];
+  const consoleEventListener = m => messages.push(m.text());
+  page.addListener('console', consoleEventListener);
+
+  await page.evaluate(() => {
+    const fail = async () => Promise.reject(new Error('error'));
+    console.log('begin');
+    void fail();
+    void fail();
+    fail().catch(() => {
+      console.log('end');
+    });
+  });
+
+  await expect.poll(() => messages).toEqual(['begin', 'end']);
 });

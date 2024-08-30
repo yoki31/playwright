@@ -15,12 +15,10 @@
  * limitations under the License.
  */
 
-import { test as it, expect } from './pageTest';
+import type { Page } from '@playwright/test';
+import { test as it, expect, rafraf } from './pageTest';
 
-async function giveItAChanceToResolve(page) {
-  for (let i = 0; i < 5; i++)
-    await page.evaluate(() => new Promise(f => requestAnimationFrame(() => requestAnimationFrame(f))));
-}
+const giveItAChanceToResolve = (page: Page) => rafraf(page, 5);
 
 it('should wait for visible', async ({ page }) => {
   await page.setContent(`<div style='display:none'>content</div>`);
@@ -83,17 +81,6 @@ it('should wait for hidden when detached', async ({ page }) => {
   await promise;
 });
 
-it('should wait for enabled button', async ({ page, server }) => {
-  await page.setContent('<button disabled><span>Target</span></button>');
-  const span = await page.$('text=Target');
-  let done = false;
-  const promise = span.waitForElementState('enabled').then(() => done = true);
-  await giveItAChanceToResolve(page);
-  expect(done).toBe(false);
-  await span.evaluate(span => (span.parentElement as HTMLButtonElement).disabled = false);
-  await promise;
-});
-
 it('should throw waiting for enabled when detached', async ({ page }) => {
   await page.setContent(`<button disabled>Target</button>`);
   const button = await page.$('button');
@@ -101,17 +88,6 @@ it('should throw waiting for enabled when detached', async ({ page }) => {
   await button.evaluate(button => button.remove());
   const error = await promise;
   expect(error.message).toContain('Element is not attached to the DOM');
-});
-
-it('should wait for button with a disabled fieldset', async ({ page }) => {
-  await page.setContent('<fieldset disabled=true><button><span>Target</span></button></div>');
-  const span = await page.$('text=Target');
-  let done = false;
-  const promise = span.waitForElementState('enabled').then(() => done = true);
-  await giveItAChanceToResolve(page);
-  expect(done).toBe(false);
-  await span.evaluate(span => (span.parentElement.parentElement as HTMLFieldSetElement).disabled = false);
-  await promise;
 });
 
 it('should wait for aria enabled button', async ({ page }) => {
@@ -126,24 +102,13 @@ it('should wait for aria enabled button', async ({ page }) => {
 });
 
 it('should wait for button with an aria-disabled parent', async ({ page }) => {
-  await page.setContent('<div aria-disabled=true><button><span>Target</span></button></div>');
+  await page.setContent('<div role="group" aria-disabled=true><button><span>Target</span></button></div>');
   const span = await page.$('text=Target');
   let done = false;
   const promise = span.waitForElementState('enabled').then(() => done = true);
   await giveItAChanceToResolve(page);
   expect(done).toBe(false);
   await span.evaluate(span => span.parentElement.parentElement.setAttribute('aria-disabled', 'false'));
-  await promise;
-});
-
-it('should wait for disabled button', async ({ page }) => {
-  await page.setContent('<button><span>Target</span></button>');
-  const span = await page.$('text=Target');
-  let done = false;
-  const promise = span.waitForElementState('disabled').then(() => done = true);
-  await giveItAChanceToResolve(page);
-  expect(done).toBe(false);
-  await span.evaluate(span => (span.parentElement as HTMLButtonElement).disabled = true);
   await promise;
 });
 
@@ -156,6 +121,8 @@ it('should wait for stable position', async ({ page, server, browserName, platfo
     button.style.transition = 'margin 10000ms linear 0s';
     button.style.marginLeft = '20000px';
   });
+  // rafraf for Firefox to kick in the animation.
+  await rafraf(page);
   let done = false;
   const promise = button.waitForElementState('stable').then(() => done = true);
   await giveItAChanceToResolve(page);

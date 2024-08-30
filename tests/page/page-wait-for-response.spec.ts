@@ -22,9 +22,9 @@ it('should work', async ({ page, server }) => {
   const [response] = await Promise.all([
     page.waitForResponse(server.PREFIX + '/digits/2.png'),
     page.evaluate(() => {
-      fetch('/digits/1.png');
-      fetch('/digits/2.png');
-      fetch('/digits/3.png');
+      void fetch('/digits/1.png');
+      void fetch('/digits/2.png');
+      void fetch('/digits/3.png');
     })
   ]);
   expect(response.url()).toBe(server.PREFIX + '/digits/2.png');
@@ -47,9 +47,9 @@ it('should respect default timeout', async ({ page, playwright }) => {
 });
 
 it('should log the url', async ({ page }) => {
-  const error1 = await page.waitForResponse('foo.css', { timeout: 100 }).catch(e => e);
+  const error1 = await page.waitForResponse('foo.css', { timeout: 1000 }).catch(e => e);
   expect(error1.message).toContain('waiting for response "foo.css"');
-  const error2 = await page.waitForResponse(/foo.css/i, { timeout: 100 }).catch(e => e);
+  const error2 = await page.waitForResponse(/foo.css/i, { timeout: 1000 }).catch(e => e);
   expect(error2.message).toContain('waiting for response /foo.css/i');
 });
 
@@ -58,9 +58,9 @@ it('should work with predicate', async ({ page, server }) => {
   const [response] = await Promise.all([
     page.waitForEvent('response', response => response.url() === server.PREFIX + '/digits/2.png'),
     page.evaluate(() => {
-      fetch('/digits/1.png');
-      fetch('/digits/2.png');
-      fetch('/digits/3.png');
+      void fetch('/digits/1.png');
+      void fetch('/digits/2.png');
+      void fetch('/digits/3.png');
     })
   ]);
   expect(response.url()).toBe(server.PREFIX + '/digits/2.png');
@@ -78,8 +78,8 @@ it('should work with async predicate', async ({ page, server }) => {
       return text.includes('bar');
     }),
     page.evaluate(() => {
-      fetch('/simple.json').then(r => r.json());
-      fetch('/file-to-upload.txt').then(r => r.text());
+      void fetch('/simple.json').then(r => r.json());
+      void fetch('/file-to-upload.txt').then(r => r.text());
     })
   ]);
   expect(response1.url()).toBe(server.PREFIX + '/file-to-upload.txt');
@@ -108,11 +108,25 @@ it('should work with no timeout', async ({ page, server }) => {
   await page.goto(server.EMPTY_PAGE);
   const [response] = await Promise.all([
     page.waitForResponse(server.PREFIX + '/digits/2.png', { timeout: 0 }),
-    page.evaluate(() => setTimeout(() => {
-      fetch('/digits/1.png');
-      fetch('/digits/2.png');
-      fetch('/digits/3.png');
+    page.evaluate(() => window.builtinSetTimeout(() => {
+      void fetch('/digits/1.png');
+      void fetch('/digits/2.png');
+      void fetch('/digits/3.png');
     }, 50))
   ]);
   expect(response.url()).toBe(server.PREFIX + '/digits/2.png');
+});
+
+it('should work with re-rendered cached IMG elements', async ({ page, server, browserName }) => {
+  it.fixme(browserName === 'webkit');
+  it.fixme(browserName === 'firefox');
+  await page.goto(server.EMPTY_PAGE);
+  await page.setContent(`<img src="pptr.png">`);
+  await page.$eval('img', img => img.remove());
+  const [response] = await Promise.all([
+    page.waitForRequest(/pptr/),
+    page.waitForResponse(/pptr/),
+    page.setContent(`<img src="pptr.png">`)
+  ]);
+  expect(response.url()).toBe(server.PREFIX + '/pptr.png');
 });

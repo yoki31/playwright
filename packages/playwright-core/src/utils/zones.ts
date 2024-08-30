@@ -14,57 +14,53 @@
  * limitations under the License.
  */
 
-import { captureRawStack } from './stackTrace';
+import { AsyncLocalStorage } from 'async_hooks';
+
+export type ZoneType = 'apiZone' | 'expectZone' | 'stepZone';
 
 class ZoneManager {
-  lastZoneId = 0;
-  readonly _zones = new Map<number, Zone>();
+  private readonly _asyncLocalStorage = new AsyncLocalStorage<Zone<unknown>|undefined>();
 
-  constructor() {
+  run<T, R>(type: ZoneType, data: T, func: () => R): R {
+    const previous = this._asyncLocalStorage.getStore();
+    const zone = new Zone(previous, type, data);
+    return this._asyncLocalStorage.run(zone, func);
   }
 
-  async run<T, R>(type: string, data: T, func: () => Promise<R>): Promise<R> {
-    const zone = new Zone(this, ++this.lastZoneId, type, data);
-    this._zones.set(zone.id, zone);
-    return zone.run(func);
-  }
-
-  zoneData<T>(type: string, rawStack?: string): T | null {
-    const stack = rawStack || captureRawStack();
-
-    for (const line of stack.split('\n')) {
-      const index = line.indexOf('__PWZONE__[');
-      if (index !== -1) {
-        const zoneId = + line.substring(index + '__PWZONE__['.length, line.indexOf(']', index));
-        const zone = this._zones.get(zoneId);
-        if (zone && zone.type === type)
-          return zone.data;
-      }
+  zoneData<T>(type: ZoneType): T | undefined {
+    for (let zone = this._asyncLocalStorage.getStore(); zone; zone = zone.previous) {
+      if (zone.type === type)
+        return zone.data as T;
     }
-    return null;
+    return undefined;
+  }
+
+  exitZones<R>(func: () => R): R {
+    return this._asyncLocalStorage.run(undefined, func);
+  }
+
+  printZones() {
+    const zones = [];
+    for (let zone = this._asyncLocalStorage.getStore(); zone; zone = zone.previous) {
+      let str = zone.type;
+      if (zone.type === 'apiZone')
+        str += `(${(zone.data as any).apiName})`;
+      zones.push(str);
+      
+    }
+    console.log('zones: ', zones.join(' -> '));
   }
 }
 
-class Zone {
-  private _manager: ZoneManager;
-  readonly id: number;
-  readonly type: string;
-  readonly data: any = {};
+class Zone<T> {
+  readonly type: ZoneType;
+  readonly data: T;
+  readonly previous: Zone<unknown> | undefined;
 
-  constructor(manager: ZoneManager, id: number, type: string, data: any) {
-    this._manager = manager;
-    this.id = id;
+  constructor(previous: Zone<unknown> | undefined, type: ZoneType, data: T) {
     this.type = type;
     this.data = data;
-  }
-
-  async run<R>(func: () => Promise<R>): Promise<R> {
-    Object.defineProperty(func, 'name', { value: `__PWZONE__[${this.id}]` });
-    try {
-      return await func();
-    } finally {
-      this._manager._zones.delete(this.id);
-    }
+    this.previous = previous;
   }
 }
 

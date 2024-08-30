@@ -9,8 +9,9 @@
 #include "libyuv.h"
 #include "mozilla/EndianUtils.h"
 #include "mozilla/gfx/DataSurfaceHelpers.h"
-#include "rtc_base/refcountedobject.h"
-#include "rtc_base/scoped_ref_ptr.h"
+#include "rtc_base/ref_counted_object.h"
+#include "rtc_base/time_utils.h"
+#include "api/scoped_refptr.h"
 
 using namespace mozilla::widget;
 using namespace webrtc;
@@ -18,7 +19,9 @@ using namespace webrtc;
 namespace mozilla {
 
 rtc::scoped_refptr<webrtc::VideoCaptureModuleEx> HeadlessWindowCapturer::Create(HeadlessWidget* headlessWindow) {
-  return new rtc::RefCountedObject<HeadlessWindowCapturer>(headlessWindow);
+  return rtc::scoped_refptr<webrtc::VideoCaptureModuleEx>(
+    new rtc::RefCountedObject<HeadlessWindowCapturer>(headlessWindow)
+  );
 }
 
 HeadlessWindowCapturer::HeadlessWindowCapturer(mozilla::widget::HeadlessWidget* window)
@@ -33,6 +36,10 @@ void HeadlessWindowCapturer::RegisterCaptureDataCallback(rtc::VideoSinkInterface
   rtc::CritScope lock2(&_callBackCs);
   _dataCallBacks.insert(dataCallback);
 }
+
+void HeadlessWindowCapturer::RegisterCaptureDataCallback(webrtc::RawVideoSinkInterface* dataCallback) {
+}
+
 void HeadlessWindowCapturer::DeRegisterCaptureDataCallback(rtc::VideoSinkInterface<webrtc::VideoFrame>* dataCallback) {
   rtc::CritScope lock2(&_callBackCs);
   auto it = _dataCallBacks.find(dataCallback);
@@ -68,7 +75,7 @@ int32_t HeadlessWindowCapturer::StopCaptureIfAllClientsClose() {
   }
 }
 
-int32_t HeadlessWindowCapturer::StartCapture(const VideoCaptureCapability& capability) {
+int32_t HeadlessWindowCapturer::StartCapture(const webrtc::VideoCaptureCapability& capability) {
   mWindow->SetSnapshotListener([this] (RefPtr<gfx::DataSourceSurface>&& dataSurface){
     if (!NS_IsInCompositorThread()) {
       fprintf(stderr, "SnapshotListener is called not on the Compositor thread!\n");

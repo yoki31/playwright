@@ -14,25 +14,33 @@
  * limitations under the License.
  */
 
-import * as http from 'http';
-import * as https from 'https';
-import { HttpsProxyAgent } from 'https-proxy-agent';
-import { Progress, ProgressController } from './progress';
-import { SocksProxyAgent } from 'socks-proxy-agent';
-import { pipeline, Readable, Transform } from 'stream';
+import type * as channels from '@protocol/channels';
+import type { LookupAddress } from 'dns';
+import http from 'http';
+import https from 'https';
+import type { Readable, TransformCallback } from 'stream';
+import { pipeline, Transform } from 'stream';
 import url from 'url';
 import zlib from 'zlib';
-import { HTTPCredentials } from '../../types/types';
-import * as channels from '../protocol/channels';
-import { TimeoutSettings } from '../utils/timeoutSettings';
-import { assert, createGuid, getPlaywrightVersion, monotonicTime } from '../utils/utils';
-import { BrowserContext } from './browserContext';
+import type { HTTPCredentials } from '../../types/types';
+import { TimeoutSettings } from '../common/timeoutSettings';
+import { getUserAgent } from '../utils/userAgent';
+import { assert, createGuid, monotonicTime } from '../utils';
+import { HttpsProxyAgent, SocksProxyAgent } from '../utilsBundle';
+import { BrowserContext, verifyClientCertificates } from './browserContext';
 import { CookieStore, domainMatches } from './cookieStore';
 import { MultipartFormData } from './formData';
-import { CallMetadata, SdkObject } from './instrumentation';
-import { Playwright } from './playwright';
-import * as types from './types';
-import { HeadersArray, ProxySettings } from './types';
+import { httpHappyEyeballsAgent, httpsHappyEyeballsAgent } from '../utils/happy-eyeballs';
+import type { CallMetadata } from './instrumentation';
+import { SdkObject } from './instrumentation';
+import type { Playwright } from './playwright';
+import type { Progress } from './progress';
+import { ProgressController } from './progress';
+import { Tracing } from './trace/recorder/tracing';
+import type * as types from './types';
+import type { HeadersArray, ProxySettings } from './types';
+import { kMaxCookieExpiresDateInSeconds } from './network';
+import { getMatchingTLSOptionsForOrigin, rewriteOpenSSLErrorIfNeeded } from './socksClientCertificatesInterceptor';
 
 type FetchRequestOptions = {
   userAgent: string;
@@ -42,13 +50,16 @@ type FetchRequestOptions = {
   timeoutSettings: TimeoutSettings;
   ignoreHTTPSErrors?: boolean;
   baseURL?: string;
+  clientCertificates?: channels.BrowserNewContextOptions['clientCertificates'];
 };
+
+type HeadersObject = Readonly<{ [name: string]: string }>;
 
 export type APIRequestEvent = {
   url: URL,
   method: string,
-  headers: { [name: string]: string },
-  cookies: types.NameValueList,
+  headers: HeadersObject,
+  cookies: channels.NameValue[],
   postData?: Buffer
 };
 
@@ -56,11 +67,18 @@ export type APIRequestFinishedEvent = {
   requestEvent: APIRequestEvent,
   httpVersion: string;
   headers: http.IncomingHttpHeaders;
-  cookies: types.NetworkCookie[];
+  cookies: channels.NetworkCookie[];
   rawHeaders: string[];
   statusCode: number;
   statusMessage: string;
   body?: Buffer;
+};
+
+type SendRequestOptions = https.RequestOptions & {
+  maxRedirects: number,
+  deadline: number,
+  headers: HeadersObject,
+  __testHookLookup?: (hostname: string) => LookupAddress[]
 };
 
 export abstract class APIRequestContext extends SdkObject {
@@ -74,6 +92,8 @@ export abstract class APIRequestContext extends SdkObject {
   readonly fetchResponses: Map<string, Buffer> = new Map();
   readonly fetchLog: Map<string, string[]> = new Map();
   protected static allInstances: Set<APIRequestContext> = new Set();
+  readonly _activeProgressControllers = new Set<ProgressController>();
+  _closeReason: string | undefined;
 
   static findResponseBody(guid: string): Buffer | undefined {
     for (const request of APIRequestContext.allInstances) {
@@ -85,7 +105,7 @@ export abstract class APIRequestContext extends SdkObject {
   }
 
   constructor(parent: SdkObject) {
-    super(parent, 'fetchRequest');
+    super(parent, 'request-context');
     APIRequestContext.allInstances.add(this);
   }
 
@@ -101,11 +121,13 @@ export abstract class APIRequestContext extends SdkObject {
     this.fetchLog.delete(fetchUid);
   }
 
-  abstract dispose(): void;
+  abstract tracing(): Tracing;
+
+  abstract dispose(options: { reason?: string }): Promise<void>;
 
   abstract _defaultOptions(): FetchRequestOptions;
-  abstract _addCookies(cookies: types.NetworkCookie[]): Promise<void>;
-  abstract _cookies(url: URL): Promise<types.NetworkCookie[]>;
+  abstract _addCookies(cookies: channels.NetworkCookie[]): Promise<void>;
+  abstract _cookies(url: URL): Promise<channels.NetworkCookie[]>;
   abstract storageState(): Promise<channels.APIRequestContextStorageStateResult>;
 
   private _storeResponseBody(body: Buffer): string {
@@ -114,28 +136,41 @@ export abstract class APIRequestContext extends SdkObject {
     return uid;
   }
 
-  async fetch(params: channels.APIRequestContextFetchParams, metadata: CallMetadata): Promise<Omit<types.APIResponse, 'body'> & { fetchUid: string }> {
-    const headers: { [name: string]: string } = {};
+  async fetch(params: channels.APIRequestContextFetchParams, metadata: CallMetadata): Promise<channels.APIResponse> {
     const defaults = this._defaultOptions();
-    headers['user-agent'] = defaults.userAgent;
-    headers['accept'] = '*/*';
-    headers['accept-encoding'] = 'gzip,deflate,br';
+    const headers: HeadersObject = {
+      'user-agent': defaults.userAgent,
+      'accept': '*/*',
+      'accept-encoding': 'gzip,deflate,br',
+    };
 
     if (defaults.extraHTTPHeaders) {
       for (const { name, value } of defaults.extraHTTPHeaders)
-        headers[name.toLowerCase()] = value;
+        setHeader(headers, name, value);
     }
 
     if (params.headers) {
       for (const { name, value } of params.headers)
-        headers[name.toLowerCase()] = value;
+        setHeader(headers, name, value);
     }
+
+    const requestUrl = new URL(params.url, defaults.baseURL);
+    if (params.params) {
+      for (const { name, value } of params.params)
+        requestUrl.searchParams.append(name, value);
+    }
+
+    const credentials = this._getHttpCredentials(requestUrl);
+    if (credentials?.send === 'always')
+      setBasicAuthorizationHeader(headers, credentials);
 
     const method = params.method?.toUpperCase() || 'GET';
     const proxy = defaults.proxy;
     let agent;
-    if (proxy) {
-      // TODO: support bypass proxy
+    // When `clientCertificates` is present, we set the `proxy` property to our own socks proxy
+    // for the browser to use. However, we don't need it here, because we already respect
+    // `clientCertificates` when fetching from Node.js.
+    if (proxy && !defaults.clientCertificates?.length && proxy.server !== 'per-context' && !shouldBypassProxy(requestUrl, proxy.bypass)) {
       const proxyOpts = url.parse(proxy.server);
       if (proxyOpts.protocol?.startsWith('socks')) {
         agent = new SocksProxyAgent({
@@ -145,6 +180,7 @@ export abstract class APIRequestContext extends SdkObject {
       } else {
         if (proxy.username)
           proxyOpts.auth = `${proxy.username}:${proxy.password || ''}`;
+        // TODO: We should use HttpProxyAgent conditional on proxyOpts.protocol instead of always using CONNECT method.
         agent = new HttpsProxyAgent(proxyOpts);
       }
     }
@@ -152,59 +188,59 @@ export abstract class APIRequestContext extends SdkObject {
     const timeout = defaults.timeoutSettings.timeout(params);
     const deadline = timeout && (monotonicTime() + timeout);
 
-    const options: https.RequestOptions & { maxRedirects: number, deadline: number } = {
+    const options: SendRequestOptions = {
       method,
       headers,
       agent,
-      maxRedirects: 20,
+      maxRedirects: params.maxRedirects === 0 ? -1 : params.maxRedirects === undefined ? 20 : params.maxRedirects,
       timeout,
-      deadline
+      deadline,
+      ...getMatchingTLSOptionsForOrigin(this._defaultOptions().clientCertificates, requestUrl.origin),
+      __testHookLookup: (params as any).__testHookLookup,
     };
-    // rejectUnauthorized = undefined is treated as true in node 12.
+    // rejectUnauthorized = undefined is treated as true in Node.js 12.
     if (params.ignoreHTTPSErrors || defaults.ignoreHTTPSErrors)
       options.rejectUnauthorized = false;
 
-    const requestUrl = new URL(params.url, defaults.baseURL);
-    if (params.params) {
-      for (const { name, value } of params.params)
-        requestUrl.searchParams.set(name, value);
-    }
-
-    let postData: Buffer | undefined;
-    if (['POST', 'PUT', 'PATCH', 'DELETE'].includes(method))
-      postData = serializePostData(params, headers);
-    else if (params.postData || params.jsonData || params.formData || params.multipartData)
-      throw new Error(`Method ${method} does not accept post data`);
+    const postData = serializePostData(params, headers);
     if (postData)
-      headers['content-length'] = String(postData.byteLength);
+      setHeader(headers, 'content-length', String(postData.byteLength));
     const controller = new ProgressController(metadata, this);
     const fetchResponse = await controller.run(progress => {
-      return this._sendRequest(progress, requestUrl, options, postData);
+      return this._sendRequestWithRetries(progress, requestUrl, options, postData, params.maxRetries);
     });
     const fetchUid = this._storeResponseBody(fetchResponse.body);
     this.fetchLog.set(fetchUid, controller.metadata.log);
-    if (params.failOnStatusCode && (fetchResponse.status < 200 || fetchResponse.status >= 400))
-      throw new Error(`${fetchResponse.status} ${fetchResponse.statusText}`);
+    if (params.failOnStatusCode && (fetchResponse.status < 200 || fetchResponse.status >= 400)) {
+      let responseText = '';
+      if (fetchResponse.body.byteLength) {
+        let text = fetchResponse.body.toString('utf8');
+        if (text.length > 1000)
+          text = text.substring(0, 997) + '...';
+        responseText = `\nResponse text:\n${text}`;
+      }
+      throw new Error(`${fetchResponse.status} ${fetchResponse.statusText}${responseText}`);
+    }
     return { ...fetchResponse, fetchUid };
   }
 
-  private _parseSetCookieHeader(responseUrl: string, setCookie: string[] | undefined): types.NetworkCookie[] {
+  private _parseSetCookieHeader(responseUrl: string, setCookie: string[] | undefined): channels.NetworkCookie[] {
     if (!setCookie)
       return [];
     const url = new URL(responseUrl);
     // https://datatracker.ietf.org/doc/html/rfc6265#section-5.1.4
     const defaultPath = '/' + url.pathname.substr(1).split('/').slice(0, -1).join('/');
-    const cookies: types.NetworkCookie[] = [];
+    const cookies: channels.NetworkCookie[] = [];
     for (const header of setCookie) {
       // Decode cookie value?
-      const cookie: types.NetworkCookie | null = parseCookie(header);
+      const cookie: channels.NetworkCookie | null = parseCookie(header);
       if (!cookie)
         continue;
       // https://datatracker.ietf.org/doc/html/rfc6265#section-5.2.3
       if (!cookie.domain)
         cookie.domain = url.hostname;
       else
-        assert(cookie.domain.startsWith('.'));
+        assert(cookie.domain.startsWith('.') || !cookie.domain.includes('.'));
       if (!domainMatches(url.hostname, cookie.domain!))
         continue;
       // https://datatracker.ietf.org/doc/html/rfc6265#section-5.2.4
@@ -215,36 +251,61 @@ export abstract class APIRequestContext extends SdkObject {
     return cookies;
   }
 
-  private async _updateRequestCookieHeader(url: URL, options: http.RequestOptions) {
-    if (options.headers!['cookie'] !== undefined)
+  private async _updateRequestCookieHeader(url: URL, headers: HeadersObject) {
+    if (getHeader(headers, 'cookie') !== undefined)
       return;
     const cookies = await this._cookies(url);
     if (cookies.length) {
       const valueArray = cookies.map(c => `${c.name}=${c.value}`);
-      options.headers!['cookie'] = valueArray.join('; ');
+      setHeader(headers, 'cookie', valueArray.join('; '));
     }
   }
 
-  private async _sendRequest(progress: Progress, url: URL, options: https.RequestOptions & { maxRedirects: number, deadline: number }, postData?: Buffer): Promise<types.APIResponse>{
-    await this._updateRequestCookieHeader(url, options);
+  private async _sendRequestWithRetries(progress: Progress, url: URL, options: SendRequestOptions, postData?: Buffer, maxRetries?: number): Promise<Omit<channels.APIResponse, 'fetchUid'> & { body: Buffer }>{
+    maxRetries ??= 0;
+    let backoff = 250;
+    for (let i = 0; i <= maxRetries; i++) {
+      try {
+        return await this._sendRequest(progress, url, options, postData);
+      } catch (e) {
+        if (maxRetries === 0)
+          throw e;
+        if (i === maxRetries || (options.deadline && monotonicTime() + backoff > options.deadline))
+          throw new Error(`Failed after ${i + 1} attempt(s): ${e}`);
+        // Retry on connection reset only.
+        if (e.code !== 'ECONNRESET')
+          throw e;
+        progress.log(`  Received ECONNRESET, will retry after ${backoff}ms.`);
+        await new Promise(f => setTimeout(f, backoff));
+        backoff *= 2;
+      }
+    }
+    throw new Error('Unreachable');
+  }
 
-    const requestCookies = (options.headers!['cookie'] as (string | undefined))?.split(';').map(p => {
+  private async _sendRequest(progress: Progress, url: URL, options: SendRequestOptions, postData?: Buffer): Promise<Omit<channels.APIResponse, 'fetchUid'> & { body: Buffer }>{
+    await this._updateRequestCookieHeader(url, options.headers);
+
+    const requestCookies = getHeader(options.headers, 'cookie')?.split(';').map(p => {
       const [name, value] = p.split('=').map(v => v.trim());
       return { name, value };
     }) || [];
     const requestEvent: APIRequestEvent = {
       url,
       method: options.method!,
-      headers: options.headers as { [name: string]: string },
+      headers: options.headers,
       cookies: requestCookies,
       postData
     };
     this.emit(APIRequestContext.Events.Request, requestEvent);
 
-    return new Promise<types.APIResponse>((fulfill, reject) => {
+    return new Promise((fulfill, reject) => {
       const requestConstructor: ((url: URL, options: http.RequestOptions, callback?: (res: http.IncomingMessage) => void) => http.ClientRequest)
         = (url.protocol === 'https:' ? https : http).request;
-      const request = requestConstructor(url, options, async response => {
+      // If we have a proxy agent already, do not override it.
+      const agent = options.agent || (url.protocol === 'https:' ? httpsHappyEyeballsAgent : httpHappyEyeballsAgent);
+      const requestOptions = { ...options, agent };
+      const request = requestConstructor(url, requestOptions as any, async response => {
         const notifyRequestFinished = (body?: Buffer) => {
           const requestFinishedEvent: APIRequestFinishedEvent = {
             requestEvent,
@@ -263,17 +324,24 @@ export abstract class APIRequestContext extends SdkObject {
           progress.log(`  ${name}: ${value}`);
 
         const cookies = this._parseSetCookieHeader(response.url || url.toString(), response.headers['set-cookie']) ;
-        if (cookies.length)
-          await this._addCookies(cookies);
+        if (cookies.length) {
+          try {
+            await this._addCookies(cookies);
+          } catch (e) {
+            // Cookie value is limited by 4096 characters in the browsers. If setCookies failed,
+            // we try setting each cookie individually just in case only some of them are bad.
+            await Promise.all(cookies.map(c => this._addCookies([c]).catch(() => {})));
+          }
+        }
 
-        if (redirectStatus.includes(response.statusCode!)) {
+        if (redirectStatus.includes(response.statusCode!) && options.maxRedirects >= 0) {
           if (!options.maxRedirects) {
             reject(new Error('Max redirect count exceeded'));
             request.destroy();
             return;
           }
           const headers = { ...options.headers };
-          delete headers[`cookie`];
+          removeHeader(headers, `cookie`);
 
           // HTTP-redirect fetch step 13 (https://fetch.spec.whatwg.org/#http-redirect-fetch)
           const status = response.statusCode!;
@@ -282,41 +350,56 @@ export abstract class APIRequestContext extends SdkObject {
               status === 303 && !['GET', 'HEAD'].includes(method)) {
             method = 'GET';
             postData = undefined;
-            delete headers[`content-encoding`];
-            delete headers[`content-language`];
-            delete headers[`content-length`];
-            delete headers[`content-location`];
-            delete headers[`content-type`];
+            removeHeader(headers, `content-encoding`);
+            removeHeader(headers, `content-language`);
+            removeHeader(headers, `content-length`);
+            removeHeader(headers, `content-location`);
+            removeHeader(headers, `content-type`);
           }
 
-          const redirectOptions: https.RequestOptions & { maxRedirects: number, deadline: number } = {
+
+          const redirectOptions: SendRequestOptions = {
             method,
             headers,
             agent: options.agent,
             maxRedirects: options.maxRedirects - 1,
             timeout: options.timeout,
-            deadline: options.deadline
+            deadline: options.deadline,
+            ...getMatchingTLSOptionsForOrigin(this._defaultOptions().clientCertificates, url.origin),
+            __testHookLookup: options.__testHookLookup,
           };
           // rejectUnauthorized = undefined is treated as true in node 12.
           if (options.rejectUnauthorized === false)
             redirectOptions.rejectUnauthorized = false;
 
           // HTTP-redirect fetch step 4: If locationURL is null, then return response.
-          if (response.headers.location) {
-            const locationURL = new URL(response.headers.location, url);
+          // Best-effort UTF-8 decoding, per spec it's US-ASCII only, but browsers are more lenient.
+          // Node.js parses it as Latin1 via std::v8::String, so we convert it to UTF-8.
+          const locationHeaderValue = Buffer.from(response.headers.location ?? '', 'latin1').toString('utf8');
+          if (locationHeaderValue) {
+            let locationURL;
+            try {
+              locationURL = new URL(locationHeaderValue, url);
+            } catch (error) {
+              reject(new Error(`uri requested responds with an invalid redirect URL: ${locationHeaderValue}`));
+              request.destroy();
+              return;
+            }
+
+            if (headers['host'])
+              headers['host'] = locationURL.host;
+
             notifyRequestFinished();
             fulfill(this._sendRequest(progress, locationURL, redirectOptions, postData));
             request.destroy();
             return;
           }
         }
-        if (response.statusCode === 401 && !options.headers!['authorization']) {
+        if (response.statusCode === 401 && !getHeader(options.headers, 'authorization')) {
           const auth = response.headers['www-authenticate'];
-          const credentials = this._defaultOptions().httpCredentials;
+          const credentials = this._getHttpCredentials(url);
           if (auth?.trim().startsWith('Basic') && credentials) {
-            const { username, password } = credentials;
-            const encoded = Buffer.from(`${username || ''}:${password || ''}`).toString('base64');
-            options.headers!['authorization'] = `Basic ${encoded}`;
+            setBasicAuthorizationHeader(options.headers, credentials);
             notifyRequestFinished();
             fulfill(this._sendRequest(progress, url, options, postData));
             request.destroy();
@@ -324,6 +407,19 @@ export abstract class APIRequestContext extends SdkObject {
           }
         }
         response.on('aborted', () => reject(new Error('aborted')));
+
+        const chunks: Buffer[] = [];
+        const notifyBodyFinished = () => {
+          const body = Buffer.concat(chunks);
+          notifyRequestFinished(body);
+          fulfill({
+            url: response.url || url.toString(),
+            status: response.statusCode || 0,
+            statusText: response.statusMessage || '',
+            headers: toHeadersArray(response.rawHeaders),
+            body
+          });
+        };
 
         let body: Readable = response;
         let transform: Transform | undefined;
@@ -334,33 +430,29 @@ export abstract class APIRequestContext extends SdkObject {
             finishFlush: zlib.constants.Z_SYNC_FLUSH
           });
         } else if (encoding === 'br') {
-          transform = zlib.createBrotliDecompress();
+          transform = zlib.createBrotliDecompress({
+            flush: zlib.constants.BROTLI_OPERATION_FLUSH,
+            finishFlush: zlib.constants.BROTLI_OPERATION_FLUSH
+          });
         } else if (encoding === 'deflate') {
           transform = zlib.createInflate();
         }
         if (transform) {
-          body = pipeline(response, transform, e => {
+          // Brotli and deflate decompressors throw if the input stream is empty.
+          const emptyStreamTransform = new SafeEmptyStreamTransform(notifyBodyFinished);
+          body = pipeline(response, emptyStreamTransform, transform, e => {
             if (e)
-              reject(new Error(`failed to decompress '${encoding}' encoding: ${e}`));
+              reject(new Error(`failed to decompress '${encoding}' encoding: ${e.message}`));
           });
+          body.on('error', e => reject(new Error(`failed to decompress '${encoding}' encoding: ${e}`)));
+        } else {
+          body.on('error', reject);
         }
 
-        const chunks: Buffer[] = [];
         body.on('data', chunk => chunks.push(chunk));
-        body.on('end', () => {
-          const body = Buffer.concat(chunks);
-          notifyRequestFinished(body);
-          fulfill({
-            url: response.url || url.toString(),
-            status: response.statusCode || 0,
-            statusText: response.statusMessage || '',
-            headers: toHeadersArray(response.rawHeaders),
-            body
-          });
-        });
-        body.on('error',reject);
+        body.on('end', notifyBodyFinished);
       });
-      request.on('error', reject);
+      request.on('error', error => reject(rewriteOpenSSLErrorIfNeeded(error)));
 
       const disposeListener = () => {
         reject(new Error('Request context disposed.'));
@@ -393,6 +485,32 @@ export abstract class APIRequestContext extends SdkObject {
       request.end();
     });
   }
+
+  private _getHttpCredentials(url: URL) {
+    if (!this._defaultOptions().httpCredentials?.origin || url.origin.toLowerCase() === this._defaultOptions().httpCredentials?.origin?.toLowerCase())
+      return this._defaultOptions().httpCredentials;
+    return undefined;
+  }
+}
+
+class SafeEmptyStreamTransform extends Transform {
+  private _receivedSomeData: boolean = false;
+  private _onEmptyStreamCallback: () => void;
+
+  constructor(onEmptyStreamCallback: () => void) {
+    super();
+    this._onEmptyStreamCallback = onEmptyStreamCallback;
+  }
+  override _transform(chunk: any, encoding: BufferEncoding, callback: TransformCallback): void {
+    this._receivedSomeData = true;
+    callback(null, chunk);
+  }
+  override _flush(callback: TransformCallback): void {
+    if (this._receivedSomeData)
+      callback(null);
+    else
+      this._onEmptyStreamCallback();
+  }
 }
 
 export class BrowserContextAPIRequestContext extends APIRequestContext {
@@ -404,7 +522,12 @@ export class BrowserContextAPIRequestContext extends APIRequestContext {
     context.once(BrowserContext.Events.Close, () => this._disposeImpl());
   }
 
-  override dispose() {
+  override tracing() {
+    return this._context.tracing;
+  }
+
+  override async dispose(options: { reason?: string }) {
+    this._closeReason = options.reason;
     this.fetchResponses.clear();
   }
 
@@ -417,14 +540,15 @@ export class BrowserContextAPIRequestContext extends APIRequestContext {
       timeoutSettings: this._context._timeoutSettings,
       ignoreHTTPSErrors: this._context._options.ignoreHTTPSErrors,
       baseURL: this._context._options.baseURL,
+      clientCertificates: this._context._options.clientCertificates,
     };
   }
 
-  async _addCookies(cookies: types.NetworkCookie[]): Promise<void> {
+  async _addCookies(cookies: channels.NetworkCookie[]): Promise<void> {
     await this._context.addCookies(cookies);
   }
 
-  async _cookies(url: URL): Promise<types.NetworkCookie[]> {
+  async _cookies(url: URL): Promise<channels.NetworkCookie[]> {
     return await this._context.cookies(url.toString());
   }
 
@@ -438,9 +562,11 @@ export class GlobalAPIRequestContext extends APIRequestContext {
   private readonly _cookieStore: CookieStore = new CookieStore();
   private readonly _options: FetchRequestOptions;
   private readonly _origins: channels.OriginStorage[] | undefined;
+  private readonly _tracing: Tracing;
 
   constructor(playwright: Playwright, options: channels.PlaywrightNewRequestOptions) {
     super(playwright);
+    this.attribution.context = this;
     const timeoutSettings = new TimeoutSettings();
     if (options.timeout !== undefined)
       timeoutSettings.setDefaultTimeout(options.timeout);
@@ -450,24 +576,35 @@ export class GlobalAPIRequestContext extends APIRequestContext {
       if (!/^\w+:\/\//.test(url))
         url = 'http://' + url;
       proxy.server = url;
+      if (options.clientCertificates)
+        throw new Error('Cannot specify both proxy and clientCertificates');
     }
     if (options.storageState) {
       this._origins = options.storageState.origins;
-      this._cookieStore.addCookies(options.storageState.cookies);
+      this._cookieStore.addCookies(options.storageState.cookies || []);
     }
+    verifyClientCertificates(options.clientCertificates);
     this._options = {
       baseURL: options.baseURL,
-      userAgent: options.userAgent || `Playwright/${getPlaywrightVersion()}`,
+      userAgent: options.userAgent || getUserAgent(),
       extraHTTPHeaders: options.extraHTTPHeaders,
       ignoreHTTPSErrors: !!options.ignoreHTTPSErrors,
       httpCredentials: options.httpCredentials,
+      clientCertificates: options.clientCertificates,
       proxy,
       timeoutSettings,
     };
-
+    this._tracing = new Tracing(this, options.tracesDir);
   }
 
-  override dispose() {
+  override tracing() {
+    return this._tracing;
+  }
+
+  override async dispose(options: { reason?: string }) {
+    this._closeReason = options.reason;
+    await this._tracing.flush();
+    await this._tracing.deleteTmpTracesDir();
     this._disposeImpl();
   }
 
@@ -475,11 +612,11 @@ export class GlobalAPIRequestContext extends APIRequestContext {
     return this._options;
   }
 
-  async _addCookies(cookies: types.NetworkCookie[]): Promise<void> {
+  async _addCookies(cookies: channels.NetworkCookie[]): Promise<void> {
     this._cookieStore.addCookies(cookies);
   }
 
-  async _cookies(url: URL): Promise<types.NetworkCookie[]> {
+  async _cookies(url: URL): Promise<channels.NetworkCookie[]> {
     return this._cookieStore.cookies(url);
   }
 
@@ -500,12 +637,26 @@ function toHeadersArray(rawHeaders: string[]): types.HeadersArray {
 
 const redirectStatus = [301, 302, 303, 307, 308];
 
-function parseCookie(header: string): types.NetworkCookie | null {
-  const pairs = header.split(';').filter(s => s.trim().length > 0).map(p => p.split('=').map(s => s.trim()));
+function parseCookie(header: string): channels.NetworkCookie | null {
+  const pairs = header.split(';').filter(s => s.trim().length > 0).map(p => {
+    let key = '';
+    let value = '';
+    const separatorPos = p.indexOf('=');
+    if (separatorPos === -1) {
+      // If only a key is specified, the value is left undefined.
+      key = p.trim();
+    } else {
+      // Otherwise we assume that the key is the element before the first `=`
+      key = p.slice(0, separatorPos).trim();
+      // And the value is the rest of the string.
+      value = p.slice(separatorPos + 1).trim();
+    }
+    return [key, value];
+  });
   if (!pairs.length)
     return null;
   const [name, value] = pairs[0];
-  const cookie: types.NetworkCookie = {
+  const cookie: channels.NetworkCookie = {
     name,
     value,
     domain: '',
@@ -513,24 +664,38 @@ function parseCookie(header: string): types.NetworkCookie | null {
     expires: -1,
     httpOnly: false,
     secure: false,
-    sameSite: 'Lax' // None for non-chromium
+    // From https://developer.mozilla.org/en-US/docs/Web/HTTP/Headers/Set-Cookie/SameSite
+    // The cookie-sending behavior if SameSite is not specified is SameSite=Lax.
+    sameSite: 'Lax'
   };
   for (let i = 1; i < pairs.length; i++) {
     const [name, value] = pairs[i];
     switch (name.toLowerCase()) {
       case 'expires':
         const expiresMs = (+new Date(value));
-        if (isFinite(expiresMs))
-          cookie.expires = expiresMs / 1000;
+        // https://datatracker.ietf.org/doc/html/rfc6265#section-5.2.1
+        if (isFinite(expiresMs)) {
+          if (expiresMs <= 0)
+            cookie.expires = 0;
+          else
+            cookie.expires = Math.min(expiresMs / 1000, kMaxCookieExpiresDateInSeconds);
+        }
         break;
       case 'max-age':
         const maxAgeSec = parseInt(value, 10);
-        if (isFinite(maxAgeSec))
-          cookie.expires = Date.now() / 1000 + maxAgeSec;
+        if (isFinite(maxAgeSec)) {
+          // From https://datatracker.ietf.org/doc/html/rfc6265#section-5.2.2
+          // If delta-seconds is less than or equal to zero (0), let expiry-time
+          // be the earliest representable date and time.
+          if (maxAgeSec <= 0)
+            cookie.expires = 0;
+          else
+            cookie.expires = Math.min(Date.now() / 1000 + maxAgeSec, kMaxCookieExpiresDateInSeconds);
+        }
         break;
       case 'domain':
         cookie.domain = value.toLocaleLowerCase() || '';
-        if (cookie.domain && !cookie.domain.startsWith('.'))
+        if (cookie.domain && !cookie.domain.startsWith('.') && cookie.domain.includes('.'))
           cookie.domain = '.' + cookie.domain;
         break;
       case 'path':
@@ -542,36 +707,34 @@ function parseCookie(header: string): types.NetworkCookie | null {
       case 'httponly':
         cookie.httpOnly = true;
         break;
+      case 'samesite':
+        switch (value.toLowerCase()) {
+          case 'none':
+            cookie.sameSite = 'None';
+            break;
+          case 'lax':
+            cookie.sameSite = 'Lax';
+            break;
+          case 'strict':
+            cookie.sameSite = 'Strict';
+            break;
+        }
+        break;
     }
   }
   return cookie;
 }
 
-function isJsonParsable(value: any) {
-  if (typeof value !== 'string')
-    return false;
-  try {
-    JSON.parse(value);
-    return true;
-  } catch (e) {
-    if (e instanceof SyntaxError)
-      return false;
-    else
-      throw e;
-  }
-}
-
-function serializePostData(params: channels.APIRequestContextFetchParams, headers: { [name: string]: string }): Buffer | undefined {
+function serializePostData(params: channels.APIRequestContextFetchParams, headers: HeadersObject): Buffer | undefined {
   assert((params.postData ? 1 : 0) + (params.jsonData ? 1 : 0) + (params.formData ? 1 : 0) + (params.multipartData ? 1 : 0) <= 1, `Only one of 'data', 'form' or 'multipart' can be specified`);
-  if (params.jsonData) {
-    const json = isJsonParsable(params.jsonData) ? params.jsonData : JSON.stringify(params.jsonData);
-    headers['content-type'] ??= 'application/json';
-    return Buffer.from(json, 'utf8');
+  if (params.jsonData !== undefined) {
+    setHeader(headers, 'content-type', 'application/json', true);
+    return Buffer.from(params.jsonData, 'utf8');
   } else if (params.formData) {
     const searchParams = new URLSearchParams();
     for (const { name, value } of params.formData)
       searchParams.append(name, value);
-    headers['content-type'] ??= 'application/x-www-form-urlencoded';
+    setHeader(headers, 'content-type', 'application/x-www-form-urlencoded', true);
     return Buffer.from(searchParams.toString(), 'utf8');
   } else if (params.multipartData) {
     const formData = new MultipartFormData();
@@ -581,11 +744,47 @@ function serializePostData(params: channels.APIRequestContextFetchParams, header
       else if (field.value)
         formData.addField(field.name, field.value);
     }
-    headers['content-type'] ??= formData.contentTypeHeader();
+    setHeader(headers, 'content-type', formData.contentTypeHeader(), true);
     return formData.finish();
-  } else if (params.postData) {
-    headers['content-type'] ??= 'application/octet-stream';
-    return Buffer.from(params.postData, 'base64');
+  } else if (params.postData !== undefined) {
+    setHeader(headers, 'content-type', 'application/octet-stream', true);
+    return params.postData;
   }
   return undefined;
+}
+
+function setHeader(headers: { [name: string]: string }, name: string, value: string, keepExisting = false) {
+  const existing = Object.entries(headers).find(pair => pair[0].toLowerCase() === name.toLowerCase());
+  if (!existing)
+    headers[name] = value;
+  else if (!keepExisting)
+    headers[existing[0]] = value;
+}
+
+function getHeader(headers: HeadersObject, name: string) {
+  const existing = Object.entries(headers).find(pair => pair[0].toLowerCase() === name.toLowerCase());
+  return existing ? existing[1] : undefined;
+}
+
+function removeHeader(headers: { [name: string]: string }, name: string) {
+  delete headers[name];
+}
+
+function shouldBypassProxy(url: URL, bypass?: string): boolean {
+  if (!bypass)
+    return false;
+  const domains = bypass.split(',').map(s => {
+    s = s.trim();
+    if (!s.startsWith('.'))
+      s = '.' + s;
+    return s;
+  });
+  const domain = '.' + url.hostname;
+  return domains.some(d => domain.endsWith(d));
+}
+
+function setBasicAuthorizationHeader(headers: { [name: string]: string }, credentials: HTTPCredentials) {
+  const { username, password } = credentials;
+  const encoded = Buffer.from(`${username || ''}:${password || ''}`).toString('base64');
+  setHeader(headers, 'authorization', `Basic ${encoded}`);
 }

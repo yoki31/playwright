@@ -24,23 +24,27 @@ import { JSHandle } from './jsHandle';
 import { Request, Response, Route, WebSocket } from './network';
 import { Page, BindingCall } from './page';
 import { Worker } from './worker';
-import { ConsoleMessage } from './consoleMessage';
 import { Dialog } from './dialog';
-import { parseError } from '../protocol/serializers';
+import { parseError, TargetClosedError } from './errors';
 import { CDPSession } from './cdpSession';
 import { Playwright } from './playwright';
 import { Electron, ElectronApplication } from './electron';
-import * as channels from '../protocol/channels';
+import type * as channels from '@protocol/channels';
 import { Stream } from './stream';
+import { WritableStream } from './writableStream';
 import { debugLogger } from '../utils/debugLogger';
 import { SelectorsOwner } from './selectors';
 import { Android, AndroidSocket, AndroidDevice } from './android';
-import { ParsedStackTrace } from '../utils/stackTrace';
 import { Artifact } from './artifact';
 import { EventEmitter } from 'events';
 import { JsonPipe } from './jsonPipe';
 import { APIRequestContext } from './fetch';
 import { LocalUtils } from './localUtils';
+import { Tracing } from './tracing';
+import { findValidator, ValidationError, type ValidatorContext } from '../protocol/validator';
+import { createInstrumentation } from './clientInstrumentation';
+import type { ClientInstrumentation } from './clientInstrumentation';
+import { formatCallLog, rewriteErrorMessage, zones } from '../utils';
 
 class Root extends ChannelOwner<channels.RootChannel> {
   constructor(connection: Connection) {
@@ -54,19 +58,29 @@ class Root extends ChannelOwner<channels.RootChannel> {
   }
 }
 
+class DummyChannelOwner extends ChannelOwner {
+}
+
 export class Connection extends EventEmitter {
   readonly _objects = new Map<string, ChannelOwner>();
-  private _waitingForObject = new Map<string, any>();
   onmessage = (message: object): void => {};
   private _lastId = 0;
-  private _callbacks = new Map<number, { resolve: (a: any) => void, reject: (a: Error) => void, stackTrace: ParsedStackTrace | null }>();
+  private _callbacks = new Map<number, { resolve: (a: any) => void, reject: (a: Error) => void, apiName: string | undefined, type: string, method: string }>();
   private _rootObject: Root;
-  private _closedErrorMessage: string | undefined;
+  private _closedError: Error | undefined;
   private _isRemote = false;
+  private _localUtils?: LocalUtils;
+  private _rawBuffers = false;
+  // Some connections allow resolving in-process dispatchers.
+  toImpl: ((client: ChannelOwner) => any) | undefined;
+  private _tracingCount = 0;
+  readonly _instrumentation: ClientInstrumentation;
 
-  constructor() {
+  constructor(localUtils: LocalUtils | undefined, instrumentation: ClientInstrumentation | undefined) {
     super();
     this._rootObject = new Root(this);
+    this._localUtils = localUtils;
+    this._instrumentation = instrumentation || createInstrumentation();
   }
 
   markAsRemote() {
@@ -77,96 +91,128 @@ export class Connection extends EventEmitter {
     return this._isRemote;
   }
 
-  async initializePlaywright(): Promise<Playwright> {
-    return await this._rootObject.initialize();
+  useRawBuffers() {
+    this._rawBuffers = true;
   }
 
-  pendingProtocolCalls(): ParsedStackTrace[] {
-    return Array.from(this._callbacks.values()).map(callback => callback.stackTrace).filter(Boolean) as ParsedStackTrace[];
+  rawBuffers() {
+    return this._rawBuffers;
+  }
+
+  localUtils(): LocalUtils {
+    return this._localUtils!;
+  }
+
+  async initializePlaywright(): Promise<Playwright> {
+    return await this._rootObject.initialize();
   }
 
   getObjectWithKnownName(guid: string): any {
     return this._objects.get(guid)!;
   }
 
-  async sendMessageToServer(object: ChannelOwner, method: string, params: any, stackTrace: ParsedStackTrace | null): Promise<any> {
-    if (this._closedErrorMessage)
-      throw new Error(this._closedErrorMessage);
-
-    const { apiName, frames } = stackTrace || { apiName: '', frames: [] };
-    const guid = object._guid;
-    const id = ++this._lastId;
-    const converted = { id, guid, method, params };
-    // Do not include metadata in debug logs to avoid noise.
-    debugLogger.log('channel:command', converted);
-    const metadata: channels.Metadata = { stack: frames, apiName, internal: !apiName };
-    this.onmessage({ ...converted, metadata });
-
-    return await new Promise((resolve, reject) => this._callbacks.set(id, { resolve, reject, stackTrace }));
+  setIsTracing(isTracing: boolean) {
+    if (isTracing)
+      this._tracingCount++;
+    else
+      this._tracingCount--;
   }
 
-  _debugScopeState(): any {
-    return this._rootObject._debugScopeState();
+  async sendMessageToServer(object: ChannelOwner, method: string, params: any, apiName: string | undefined, frames: channels.StackFrame[], stepId?: string): Promise<any> {
+    if (this._closedError)
+      throw this._closedError;
+    if (object._wasCollected)
+      throw new Error('The object has been collected to prevent unbounded heap growth.');
+
+    const guid = object._guid;
+    const type = object._type;
+    const id = ++this._lastId;
+    const message = { id, guid, method, params };
+    if (debugLogger.isEnabled('channel')) {
+      // Do not include metadata in debug logs to avoid noise.
+      debugLogger.log('channel', 'SEND> ' + JSON.stringify(message));
+    }
+    const location = frames[0] ? { file: frames[0].file, line: frames[0].line, column: frames[0].column } : undefined;
+    const metadata: channels.Metadata = { apiName, location, internal: !apiName, stepId };
+    if (this._tracingCount && frames && type !== 'LocalUtils')
+      this._localUtils?._channel.addStackToTracingNoReply({ callData: { stack: frames, id } }).catch(() => {});
+    // We need to exit zones before calling into the server, otherwise
+    // when we receive events from the server, we would be in an API zone.
+    zones.exitZones(() => this.onmessage({ ...message, metadata }));
+    return await new Promise((resolve, reject) => this._callbacks.set(id, { resolve, reject, apiName, type, method }));
   }
 
   dispatch(message: object) {
-    if (this._closedErrorMessage)
+    if (this._closedError)
       return;
 
-    const { id, guid, method, params, result, error } = message as any;
+    const { id, guid, method, params, result, error, log } = message as any;
     if (id) {
-      debugLogger.log('channel:response', message);
+      if (debugLogger.isEnabled('channel'))
+        debugLogger.log('channel', '<RECV ' + JSON.stringify(message));
       const callback = this._callbacks.get(id);
       if (!callback)
         throw new Error(`Cannot find command to respond: ${id}`);
       this._callbacks.delete(id);
-      if (error && !result)
-        callback.reject(parseError(error));
-      else
-        callback.resolve(this._replaceGuidsWithChannels(result));
+      if (error && !result) {
+        const parsedError = parseError(error);
+        rewriteErrorMessage(parsedError, parsedError.message + formatCallLog(log));
+        callback.reject(parsedError);
+      } else {
+        const validator = findValidator(callback.type, callback.method, 'Result');
+        callback.resolve(validator(result, '', { tChannelImpl: this._tChannelImplFromWire.bind(this), binary: this._rawBuffers ? 'buffer' : 'fromBase64' }));
+      }
       return;
     }
 
-    debugLogger.log('channel:event', message);
+    if (debugLogger.isEnabled('channel'))
+      debugLogger.log('channel', '<EVENT ' + JSON.stringify(message));
     if (method === '__create__') {
       this._createRemoteObject(guid, params.type, params.guid, params.initializer);
       return;
     }
-    if (method === '__dispose__') {
-      const object = this._objects.get(guid);
-      if (!object)
-        throw new Error(`Cannot find object to dispose: ${guid}`);
-      object._dispose();
-      return;
-    }
+
     const object = this._objects.get(guid);
     if (!object)
-      throw new Error(`Cannot find object to emit "${method}": ${guid}`);
-    (object._channel as any).emit(method, object._type === 'JsonPipe' ? params : this._replaceGuidsWithChannels(params));
+      throw new Error(`Cannot find object to "${method}": ${guid}`);
+
+    if (method === '__adopt__') {
+      const child = this._objects.get(params.guid);
+      if (!child)
+        throw new Error(`Unknown new child: ${params.guid}`);
+      object._adopt(child);
+      return;
+    }
+
+    if (method === '__dispose__') {
+      object._dispose(params.reason);
+      return;
+    }
+
+    const validator = findValidator(object._type, method, 'Event');
+    (object._channel as any).emit(method, validator(params, '', { tChannelImpl: this._tChannelImplFromWire.bind(this), binary: this._rawBuffers ? 'buffer' : 'fromBase64' }));
   }
 
-  close(errorMessage: string = 'Connection closed') {
-    this._closedErrorMessage = errorMessage;
+  close(cause?: string) {
+    if (this._closedError)
+      return;
+    this._closedError = new TargetClosedError(cause);
     for (const callback of this._callbacks.values())
-      callback.reject(new Error(errorMessage));
+      callback.reject(this._closedError);
     this._callbacks.clear();
     this.emit('close');
   }
 
-  private _replaceGuidsWithChannels(payload: any): any {
-    if (!payload)
-      return payload;
-    if (Array.isArray(payload))
-      return payload.map(p => this._replaceGuidsWithChannels(p));
-    if (payload.guid && this._objects.has(payload.guid))
-      return this._objects.get(payload.guid)!._channel;
-    if (typeof payload === 'object') {
-      const result: any = {};
-      for (const key of Object.keys(payload))
-        result[key] = this._replaceGuidsWithChannels(payload[key]);
-      return result;
+  private _tChannelImplFromWire(names: '*' | string[], arg: any, path: string, context: ValidatorContext) {
+    if (arg && typeof arg === 'object' && typeof arg.guid === 'string') {
+      const object = this._objects.get(arg.guid)!;
+      if (!object)
+        throw new Error(`Object with guid ${arg.guid} was not bound in the connection`);
+      if (names !== '*' && !names.includes(object._type))
+        throw new ValidationError(`${path}: expected channel ${names.toString()}`);
+      return object._channel;
     }
-    return payload;
+    throw new ValidationError(`${path}: expected channel ${names.toString()}`);
   }
 
   private _createRemoteObject(parentGuid: string, type: string, guid: string, initializer: any): any {
@@ -174,7 +220,8 @@ export class Connection extends EventEmitter {
     if (!parent)
       throw new Error(`Cannot find parent object ${parentGuid} to create ${guid}`);
     let result: ChannelOwner<any>;
-    initializer = this._replaceGuidsWithChannels(initializer);
+    const validator = findValidator(type, '', 'Initializer');
+    initializer = validator(initializer, '', { tChannelImpl: this._tChannelImplFromWire.bind(this), binary: this._rawBuffers ? 'buffer' : 'fromBase64' });
     switch (type) {
       case 'Android':
         result = new Android(parent, type, guid, initializer);
@@ -206,9 +253,6 @@ export class Connection extends EventEmitter {
       case 'CDPSession':
         result = new CDPSession(parent, type, guid, initializer);
         break;
-      case 'ConsoleMessage':
-        result = new ConsoleMessage(parent, type, guid, initializer);
-        break;
       case 'Dialog':
         result = new Dialog(parent, type, guid, initializer);
         break;
@@ -232,6 +276,8 @@ export class Connection extends EventEmitter {
         break;
       case 'LocalUtils':
         result = new LocalUtils(parent, type, guid, initializer);
+        if (!this._localUtils)
+          this._localUtils = result as LocalUtils;
         break;
       case 'Page':
         result = new Page(parent, type, guid, initializer);
@@ -254,19 +300,23 @@ export class Connection extends EventEmitter {
       case 'Selectors':
         result = new SelectorsOwner(parent, type, guid, initializer);
         break;
+      case 'SocksSupport':
+        result = new DummyChannelOwner(parent, type, guid, initializer);
+        break;
+      case 'Tracing':
+        result = new Tracing(parent, type, guid, initializer);
+        break;
       case 'WebSocket':
         result = new WebSocket(parent, type, guid, initializer);
         break;
       case 'Worker':
         result = new Worker(parent, type, guid, initializer);
         break;
+      case 'WritableStream':
+        result = new WritableStream(parent, type, guid, initializer);
+        break;
       default:
         throw new Error('Missing type ' + type);
-    }
-    const callback = this._waitingForObject.get(guid);
-    if (callback) {
-      callback(result);
-      this._waitingForObject.delete(guid);
     }
     return result;
   }

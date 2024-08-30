@@ -15,22 +15,25 @@
  */
 
 import { URLSearchParams } from 'url';
-import * as channels from '../protocol/channels';
+import type * as channels from '@protocol/channels';
 import { ChannelOwner } from './channelOwner';
 import { Frame } from './frame';
-import { Headers, RemoteAddr, SecurityDetails, WaitForEventOptions } from './types';
+import { Worker } from './worker';
+import type { Headers, RemoteAddr, SecurityDetails, WaitForEventOptions } from './types';
 import fs from 'fs';
-import * as mime from 'mime';
-import { isString, headersObjectToArray } from '../utils/utils';
-import { ManualPromise } from '../utils/async';
+import { mime } from '../utilsBundle';
+import { assert, isString, headersObjectToArray, isRegExp, rewriteErrorMessage } from '../utils';
+import { ManualPromise, LongStandingScope } from '../utils/manualPromise';
 import { Events } from './events';
-import { Page } from './page';
+import type { Page } from './page';
 import { Waiter } from './waiter';
-import * as api from '../../types/types';
-import { HeadersArray, URLMatch } from '../common/types';
-import { urlMatches } from './clientHelper';
-import { MultiMap } from '../utils/multimap';
+import type * as api from '../../types/types';
+import type { HeadersArray } from '../common/types';
+import { MultiMap, urlMatches, type URLMatch } from '../utils';
 import { APIResponse } from './fetch';
+import type { Serializable } from '../../types/structs';
+import type { BrowserContext } from './browserContext';
+import { isTargetClosedError } from './errors';
 
 export type NetworkCookie = {
   name: string,
@@ -55,14 +58,34 @@ export type SetNetworkCookieParam = {
   sameSite?: 'Strict' | 'Lax' | 'None'
 };
 
+export type ClearNetworkCookieOptions = {
+  name?: string | RegExp,
+  domain?: string | RegExp,
+  path?: string | RegExp,
+};
+
+type SerializedFallbackOverrides = {
+  url?: string;
+  method?: string;
+  headers?: Headers;
+  postDataBuffer?: Buffer;
+};
+
+type FallbackOverrides = {
+  url?: string;
+  method?: string;
+  headers?: Headers;
+  postData?: string | Buffer | Serializable;
+};
+
 export class Request extends ChannelOwner<channels.RequestChannel> implements api.Request {
   private _redirectedFrom: Request | null = null;
   private _redirectedTo: Request | null = null;
   _failureText: string | null = null;
   private _provisionalHeaders: RawHeaders;
   private _actualHeadersPromise: Promise<RawHeaders> | undefined;
-  private _postData: Buffer | null;
   _timing: ResourceTiming;
+  private _fallbackOverrides: SerializedFallbackOverrides = {};
 
   static from(request: channels.RequestChannel): Request {
     return (request as any)._object;
@@ -78,7 +101,6 @@ export class Request extends ChannelOwner<channels.RequestChannel> implements ap
     if (this._redirectedFrom)
       this._redirectedFrom._redirectedTo = this;
     this._provisionalHeaders = new RawHeaders(initializer.headers);
-    this._postData = initializer.postData ? Buffer.from(initializer.postData, 'base64') : null;
     this._timing = {
       startTime: 0,
       domainLookupStart: -1,
@@ -93,7 +115,7 @@ export class Request extends ChannelOwner<channels.RequestChannel> implements ap
   }
 
   url(): string {
-    return this._initializer.url;
+    return this._fallbackOverrides.url || this._initializer.url;
   }
 
   resourceType(): string {
@@ -101,15 +123,15 @@ export class Request extends ChannelOwner<channels.RequestChannel> implements ap
   }
 
   method(): string {
-    return this._initializer.method;
+    return this._fallbackOverrides.method || this._initializer.method;
   }
 
   postData(): string | null {
-    return this._postData ? this._postData.toString('utf8') : null;
+    return (this._fallbackOverrides.postDataBuffer || this._initializer.postData)?.toString('utf-8') || null;
   }
 
   postDataBuffer(): Buffer | null {
-    return this._postData;
+    return this._fallbackOverrides.postDataBuffer || this._initializer.postData || null;
   }
 
   postDataJSON(): Object | null {
@@ -118,7 +140,7 @@ export class Request extends ChannelOwner<channels.RequestChannel> implements ap
       return null;
 
     const contentType = this.headers()['content-type'];
-    if (contentType === 'application/x-www-form-urlencoded') {
+    if (contentType?.includes('application/x-www-form-urlencoded')) {
       const entries: Record<string, string> = {};
       const parsed = new URLSearchParams(postData);
       for (const [k, v] of parsed.entries())
@@ -137,16 +159,21 @@ export class Request extends ChannelOwner<channels.RequestChannel> implements ap
    * @deprecated
    */
   headers(): Headers {
+    if (this._fallbackOverrides.headers)
+      return RawHeaders._fromHeadersObjectLossy(this._fallbackOverrides.headers).headers();
     return this._provisionalHeaders.headers();
   }
 
-  _actualHeaders(): Promise<RawHeaders> {
+  async _actualHeaders(): Promise<RawHeaders> {
+    if (this._fallbackOverrides.headers)
+      return RawHeaders._fromHeadersObjectLossy(this._fallbackOverrides.headers);
+
     if (!this._actualHeadersPromise) {
       this._actualHeadersPromise = this._wrapApiCall(async () => {
         return new RawHeaders((await this._channel.rawRequestHeaders()).headers);
       });
     }
-    return this._actualHeadersPromise;
+    return await this._actualHeadersPromise;
   }
 
   async allHeaders(): Promise<Headers> {
@@ -166,13 +193,33 @@ export class Request extends ChannelOwner<channels.RequestChannel> implements ap
   }
 
   async _internalResponse(): Promise<Response | null> {
-    return this._wrapApiCall(async () => {
+    return await this._wrapApiCall(async () => {
       return Response.fromNullable((await this._channel.response()).response);
     }, true);
   }
 
   frame(): Frame {
-    return Frame.from(this._initializer.frame);
+    if (!this._initializer.frame) {
+      assert(this.serviceWorker());
+      throw new Error('Service Worker requests do not have an associated frame.');
+    }
+    const frame = Frame.from(this._initializer.frame);
+    if (!frame._page) {
+      throw new Error([
+        'Frame for this navigation request is not available, because the request',
+        'was issued before the frame is created. You can check whether the request',
+        'is a navigation request by calling isNavigationRequest() method.',
+      ].join('\n'));
+    }
+    return frame;
+  }
+
+  _safePage(): Page | null {
+    return Frame.fromNullable(this._initializer.frame)?._page || null;
+  }
+
+  serviceWorker(): Worker | null {
+    return this._initializer.serviceWorker ? Worker.from(this._initializer.serviceWorker) : null;
   }
 
   isNavigationRequest(): boolean {
@@ -206,12 +253,46 @@ export class Request extends ChannelOwner<channels.RequestChannel> implements ap
     return (await response._channel.sizes()).sizes;
   }
 
+  _setResponseEndTiming(responseEndTiming: number) {
+    this._timing.responseEnd = responseEndTiming;
+    if (this._timing.responseStart === -1)
+      this._timing.responseStart = responseEndTiming;
+  }
+
   _finalRequest(): Request {
     return this._redirectedTo ? this._redirectedTo._finalRequest() : this;
+  }
+
+  _applyFallbackOverrides(overrides: FallbackOverrides) {
+    if (overrides.url)
+      this._fallbackOverrides.url = overrides.url;
+    if (overrides.method)
+      this._fallbackOverrides.method = overrides.method;
+    if (overrides.headers)
+      this._fallbackOverrides.headers = overrides.headers;
+
+    if (isString(overrides.postData))
+      this._fallbackOverrides.postDataBuffer = Buffer.from(overrides.postData, 'utf-8');
+    else if (overrides.postData instanceof Buffer)
+      this._fallbackOverrides.postDataBuffer = overrides.postData;
+    else if (overrides.postData)
+      this._fallbackOverrides.postDataBuffer = Buffer.from(JSON.stringify(overrides.postData), 'utf-8');
+  }
+
+  _fallbackOverridesForContinue() {
+    return this._fallbackOverrides;
+  }
+
+  _targetClosedScope(): LongStandingScope {
+    return this.serviceWorker()?._closedScope || this._safePage()?._closedOrCrashedScope || new LongStandingScope();
   }
 }
 
 export class Route extends ChannelOwner<channels.RouteChannel> implements api.Route {
+  private _handlingPromise: ManualPromise<boolean> | null = null;
+  _context!: BrowserContext;
+  _didThrow: boolean = false;
+
   static from(route: channels.RouteChannel): Route {
     return (route as any)._object;
   }
@@ -224,29 +305,79 @@ export class Route extends ChannelOwner<channels.RouteChannel> implements api.Ro
     return Request.from(this._initializer.request);
   }
 
-  private _raceWithPageClose(promise: Promise<any>): Promise<void> {
-    const page = this.request().frame()._page;
+  private async _raceWithTargetClose(promise: Promise<any>): Promise<void> {
     // When page closes or crashes, we catch any potential rejects from this Route.
     // Note that page could be missing when routing popup's initial request that
     // does not have a Page initialized just yet.
-    return Promise.race([
-      promise,
-      page ? page._closedOrCrashedPromise : Promise.resolve(),
-    ]);
+    return await this.request()._targetClosedScope().safeRace(promise);
+  }
+
+  async _startHandling(): Promise<boolean> {
+    this._handlingPromise = new ManualPromise();
+    return await this._handlingPromise;
+  }
+
+  async fallback(options: FallbackOverrides = {}) {
+    this._checkNotHandled();
+    this.request()._applyFallbackOverrides(options);
+    this._reportHandled(false);
   }
 
   async abort(errorCode?: string) {
-    await this._raceWithPageClose(this._channel.abort({ errorCode }));
+    await this._handleRoute(async () => {
+      await this._raceWithTargetClose(this._channel.abort({ requestUrl: this.request()._initializer.url, errorCode }));
+    });
   }
 
-  async fulfill(options: { response?: api.APIResponse, status?: number, headers?: Headers, contentType?: string, body?: string | Buffer, path?: string } = {}) {
+  async _redirectNavigationRequest(url: string) {
+    await this._handleRoute(async () => {
+      await this._raceWithTargetClose(this._channel.redirectNavigationRequest({ url }));
+    });
+  }
+
+  async fetch(options: FallbackOverrides & { maxRedirects?: number, maxRetries?: number, timeout?: number } = {}): Promise<APIResponse> {
+    return await this._wrapApiCall(async () => {
+      return await this._context.request._innerFetch({ request: this.request(), data: options.postData, ...options });
+    });
+  }
+
+  async fulfill(options: { response?: api.APIResponse, status?: number, headers?: Headers, contentType?: string, body?: string | Buffer, json?: any, path?: string } = {}) {
+    await this._handleRoute(async () => {
+      await this._wrapApiCall(async () => {
+        await this._innerFulfill(options);
+      });
+    });
+  }
+
+  private async _handleRoute(callback: () => Promise<void>) {
+    this._checkNotHandled();
+    try {
+      await callback();
+      this._reportHandled(true);
+    } catch (e) {
+      this._didThrow = true;
+      throw e;
+    }
+  }
+
+  private async _innerFulfill(options: { response?: api.APIResponse, status?: number, headers?: Headers, contentType?: string, body?: string | Buffer, json?: any, path?: string } = {}): Promise<void> {
     let fetchResponseUid;
     let { status: statusOption, headers: headersOption, body } = options;
-    if (options.response) {
-      statusOption ||= options.response.status();
-      headersOption ||= options.response.headers();
-      if (options.body === undefined && options.path === undefined && options.response instanceof APIResponse)
-        fetchResponseUid = (options.response as APIResponse)._fetchUid();
+
+    if (options.json !== undefined) {
+      assert(options.body === undefined, 'Can specify either body or json parameters');
+      body = JSON.stringify(options.json);
+    }
+
+    if (options.response instanceof APIResponse) {
+      statusOption ??= options.response.status();
+      headersOption ??= options.response.headers();
+      if (body === undefined && options.path === undefined) {
+        if (options.response._request._connection === this._connection)
+          fetchResponseUid = (options.response as APIResponse)._fetchUid();
+        else
+          body = await options.response.body();
+      }
     }
 
     let isBase64 = false;
@@ -270,12 +401,15 @@ export class Route extends ChannelOwner<channels.RouteChannel> implements api.Ro
       headers[header.toLowerCase()] = String(headersOption![header]);
     if (options.contentType)
       headers['content-type'] = String(options.contentType);
+    else if (options.json)
+      headers['content-type'] = 'application/json';
     else if (options.path)
       headers['content-type'] = mime.getType(options.path) || 'application/octet-stream';
     if (length && !('content-length' in headers))
       headers['content-length'] = String(length);
 
-    await this._raceWithPageClose(this._channel.fulfill({
+    await this._raceWithTargetClose(this._channel.fulfill({
+      requestUrl: this.request()._initializer.url,
       status: statusOption || 200,
       headers: headersObjectToArray(headers),
       body,
@@ -284,28 +418,40 @@ export class Route extends ChannelOwner<channels.RouteChannel> implements api.Ro
     }));
   }
 
-  async continue(options: { url?: string, method?: string, headers?: Headers, postData?: string | Buffer } = {}) {
-    await this._continue(options);
+  async continue(options: FallbackOverrides = {}) {
+    await this._handleRoute(async () => {
+      this.request()._applyFallbackOverrides(options);
+      await this._innerContinue();
+    });
   }
 
-  async _internalContinue(options: { url?: string, method?: string, headers?: Headers, postData?: string | Buffer } = {}) {
-    await this._continue(options, true).catch(() => {});
+  _checkNotHandled() {
+    if (!this._handlingPromise)
+      throw new Error('Route is already handled!');
   }
 
-  private async _continue(options: { url?: string, method?: string, headers?: Headers, postData?: string | Buffer }, isInternal?: boolean) {
+  _reportHandled(done: boolean) {
+    const chain = this._handlingPromise!;
+    this._handlingPromise = null;
+    chain.resolve(done);
+  }
+
+  async _innerContinue(internal = false) {
+    const options = this.request()._fallbackOverridesForContinue();
     return await this._wrapApiCall(async () => {
-      const postDataBuffer = isString(options.postData) ? Buffer.from(options.postData, 'utf8') : options.postData;
-      await this._raceWithPageClose(this._channel.continue({
+      await this._raceWithTargetClose(this._channel.continue({
+        requestUrl: this.request()._initializer.url,
         url: options.url,
         method: options.method,
         headers: options.headers ? headersObjectToArray(options.headers) : undefined,
-        postData: postDataBuffer ? postDataBuffer.toString('base64') : undefined,
+        postData: options.postDataBuffer,
+        isFallback: internal,
       }));
-    }, isInternal);
+    }, !!internal);
   }
 }
 
-export type RouteHandlerCallback = (route: Route, request: Request) => void;
+export type RouteHandlerCallback = (route: Route, request: Request) => Promise<any> | void;
 
 export type ResourceTiming = {
   startTime: number;
@@ -330,7 +476,7 @@ export class Response extends ChannelOwner<channels.ResponseChannel> implements 
   private _provisionalHeaders: RawHeaders;
   private _actualHeadersPromise: Promise<RawHeaders> | undefined;
   private _request: Request;
-  readonly _finishedPromise = new ManualPromise<void>();
+  readonly _finishedPromise = new ManualPromise<null>();
 
   static from(response: channels.ResponseChannel): Response {
     return (response as any)._object;
@@ -364,6 +510,10 @@ export class Response extends ChannelOwner<channels.ResponseChannel> implements 
     return this._initializer.statusText;
   }
 
+  fromServiceWorker(): boolean {
+    return this._initializer.fromServiceWorker;
+  }
+
   /**
    * @deprecated
    */
@@ -377,7 +527,7 @@ export class Response extends ChannelOwner<channels.ResponseChannel> implements 
         return new RawHeaders((await this._channel.rawResponseHeaders()).headers);
       })();
     }
-    return this._actualHeadersPromise;
+    return await this._actualHeadersPromise;
   }
 
   async allHeaders(): Promise<Headers> {
@@ -397,11 +547,11 @@ export class Response extends ChannelOwner<channels.ResponseChannel> implements 
   }
 
   async finished(): Promise<null> {
-    return this._finishedPromise.then(() => null);
+    return await this.request()._targetClosedScope().race(this._finishedPromise);
   }
 
   async body(): Promise<Buffer> {
-    return Buffer.from((await this._channel.body()).binary, 'base64');
+    return (await this._channel.body()).binary;
   }
 
   async text(): Promise<string> {
@@ -443,13 +593,13 @@ export class WebSocket extends ChannelOwner<channels.WebSocketChannel> implement
     super(parent, type, guid, initializer);
     this._isClosed = false;
     this._page = parent as Page;
-    this._channel.on('frameSent', (event: { opcode: number, data: string }) => {
+    this._channel.on('frameSent', event => {
       if (event.opcode === 1)
         this.emit(Events.WebSocket.FrameSent, { payload: event.data });
       else if (event.opcode === 2)
         this.emit(Events.WebSocket.FrameSent, { payload: Buffer.from(event.data, 'base64') });
     });
-    this._channel.on('frameReceived', (event: { opcode: number, data: string }) => {
+    this._channel.on('frameReceived', event => {
       if (event.opcode === 1)
         this.emit(Events.WebSocket.FrameReceived, { payload: event.data });
       else if (event.opcode === 2)
@@ -471,7 +621,7 @@ export class WebSocket extends ChannelOwner<channels.WebSocketChannel> implement
   }
 
   async waitForEvent(event: string, optionsOrPredicate: WaitForEventOptions = {}): Promise<any> {
-    return this._wrapApiCall(async () => {
+    return await this._wrapApiCall(async () => {
       const timeout = this._page._timeoutSettings.timeout(typeof optionsOrPredicate === 'function' ? {} : optionsOrPredicate);
       const predicate = typeof optionsOrPredicate === 'function' ? optionsOrPredicate : optionsOrPredicate.predicate;
       const waiter = Waiter.createForEvent(this, event);
@@ -480,7 +630,7 @@ export class WebSocket extends ChannelOwner<channels.WebSocketChannel> implement
         waiter.rejectOnEvent(this, Events.WebSocket.Error, new Error('Socket error'));
       if (event !== Events.WebSocket.Close)
         waiter.rejectOnEvent(this, Events.WebSocket.Close, new Error('Socket closed'));
-      waiter.rejectOnEvent(this._page, Events.Page.Close, new Error('Page closed'));
+      waiter.rejectOnEvent(this._page, Events.Page.Close, () => this._page._closeErrorWithReason());
       const result = await waiter.waitForEvent(this, event, predicate as any);
       waiter.dispose();
       return result;
@@ -502,6 +652,8 @@ export class RouteHandler {
   private readonly _times: number;
   readonly url: URLMatch;
   readonly handler: RouteHandlerCallback;
+  private _ignoreException: boolean = false;
+  private _activeInvocations: Set<{ complete: Promise<void>, route: Route }> = new Set();
 
   constructor(baseURL: string | undefined, url: URLMatch, handler: RouteHandlerCallback, times: number = Number.MAX_SAFE_INTEGER) {
     this._baseURL = baseURL;
@@ -510,22 +662,91 @@ export class RouteHandler {
     this.handler = handler;
   }
 
+  static prepareInterceptionPatterns(handlers: RouteHandler[]) {
+    const patterns: channels.BrowserContextSetNetworkInterceptionPatternsParams['patterns'] = [];
+    let all = false;
+    for (const handler of handlers) {
+      if (isString(handler.url))
+        patterns.push({ glob: handler.url });
+      else if (isRegExp(handler.url))
+        patterns.push({ regexSource: handler.url.source, regexFlags: handler.url.flags });
+      else
+        all = true;
+    }
+    if (all)
+      return [{ glob: '**/*' }];
+    return patterns;
+  }
+
   public matches(requestURL: string): boolean {
     return urlMatches(this._baseURL, requestURL, this.url);
   }
 
-  public handle(route: Route, request: Request): boolean {
+  public async handle(route: Route): Promise<boolean> {
+    const handlerInvocation = { complete: new ManualPromise(), route } ;
+    this._activeInvocations.add(handlerInvocation);
     try {
-      this.handler(route, request);
+      return await this._handleInternal(route);
+    } catch (e) {
+      // If the handler was stopped (without waiting for completion), we ignore all exceptions.
+      if (this._ignoreException)
+        return false;
+      if (isTargetClosedError(e)) {
+        // We are failing in the handler because the target close closed.
+        // Give user a hint!
+        rewriteErrorMessage(e, `"${e.message}" while running route callback.\nConsider awaiting \`await page.unrouteAll({ behavior: 'ignoreErrors' })\`\nbefore the end of the test to ignore remaining routes in flight.`);
+      }
+      throw e;
     } finally {
-      return ++this.handledCount >= this._times;
+      handlerInvocation.complete.resolve();
+      this._activeInvocations.delete(handlerInvocation);
     }
+  }
+
+  async stop(behavior: 'wait' | 'ignoreErrors') {
+    // When a handler is manually unrouted or its page/context is closed we either
+    // - wait for the current handler invocations to finish
+    // - or do not wait, if the user opted out of it, but swallow all exceptions
+    //   that happen after the unroute/close.
+    if (behavior === 'ignoreErrors') {
+      this._ignoreException = true;
+    } else {
+      const promises = [];
+      for (const activation of this._activeInvocations) {
+        if (!activation.route._didThrow)
+          promises.push(activation.complete);
+      }
+      await Promise.all(promises);
+    }
+  }
+
+  private async _handleInternal(route: Route): Promise<boolean> {
+    ++this.handledCount;
+    const handledPromise = route._startHandling();
+    // Extract handler into a variable to avoid [RouteHandler.handler] in the stack.
+    const handler = this.handler;
+    const [handled] = await Promise.all([
+      handledPromise,
+      handler(route, route.request()),
+    ]);
+    return handled;
+  }
+
+  public willExpire(): boolean {
+    return this.handledCount + 1 >= this._times;
   }
 }
 
 export class RawHeaders {
   private _headersArray: HeadersArray;
   private _headersMap = new MultiMap<string, string>();
+
+  static _fromHeadersObjectLossy(headers: Headers): RawHeaders {
+    const headersArray: HeadersArray = Object.entries(headers).map(([name, value]) => ({
+      name, value
+    })).filter(header => header.value !== undefined);
+    return new RawHeaders(headersArray);
+  }
 
   constructor(headers: HeadersArray) {
     this._headersArray = headers;

@@ -15,32 +15,43 @@
  * limitations under the License.
  */
 
-import { kBrowserClosedError } from '../../utils/errors';
-import { assert } from '../../utils/utils';
-import { Browser, BrowserOptions } from '../browser';
-import { assertBrowserContextIsNotOwned, BrowserContext, validateBrowserContextOptions, verifyGeolocation } from '../browserContext';
+import { TargetClosedError } from '../errors';
+import { assert } from '../../utils';
+import type { BrowserOptions } from '../browser';
+import { Browser } from '../browser';
+import { assertBrowserContextIsNotOwned, BrowserContext, verifyGeolocation } from '../browserContext';
 import * as network from '../network';
-import { Page, PageBinding, PageDelegate } from '../page';
-import { ConnectionTransport } from '../transport';
-import * as types from '../types';
-import { ConnectionEvents, FFConnection } from './ffConnection';
+import type { InitScript, Page, PageDelegate } from '../page';
+import { PageBinding } from '../page';
+import type { ConnectionTransport } from '../transport';
+import type * as types from '../types';
+import type * as channels from '@protocol/channels';
+import { ConnectionEvents, FFConnection, type FFSession } from './ffConnection';
 import { FFPage } from './ffPage';
-import { Protocol } from './protocol';
+import type { Protocol } from './protocol';
+import type { SdkObject } from '../instrumentation';
 
 export class FFBrowser extends Browser {
-  _connection: FFConnection;
+  private _connection: FFConnection;
+  readonly session: FFSession;
   readonly _ffPages: Map<string, FFPage>;
   readonly _contexts: Map<string, FFBrowserContext>;
   private _version = '';
   private _userAgent: string = '';
 
-  static async connect(transport: ConnectionTransport, options: BrowserOptions): Promise<FFBrowser> {
+  static async connect(parent: SdkObject, transport: ConnectionTransport, options: BrowserOptions): Promise<FFBrowser> {
     const connection = new FFConnection(transport, options.protocolLogger, options.browserLogsCollector);
-    const browser = new FFBrowser(connection, options);
+    const browser = new FFBrowser(parent, connection, options);
     if ((options as any).__testHookOnConnectToBrowser)
       await (options as any).__testHookOnConnectToBrowser();
+    let firefoxUserPrefs = options.originalLaunchOptions.firefoxUserPrefs ?? {};
+    if (Object.keys(kBandaidFirefoxUserPrefs).length)
+      firefoxUserPrefs = { ...kBandaidFirefoxUserPrefs, ...firefoxUserPrefs };
     const promises: Promise<any>[] = [
-      connection.send('Browser.enable', { attachToDefaultContext: !!options.persistent }),
+      browser.session.send('Browser.enable', {
+        attachToDefaultContext: !!options.persistent,
+        userPrefs: Object.entries(firefoxUserPrefs).map(([name, value]) => ({ name, value })),
+      }),
       browser._initVersion(),
     ];
     if (options.persistent) {
@@ -48,26 +59,27 @@ export class FFBrowser extends Browser {
       promises.push((browser._defaultContext as FFBrowserContext)._initialize());
     }
     if (options.proxy)
-      promises.push(browser._connection.send('Browser.setBrowserProxy', toJugglerProxyOptions(options.proxy)));
+      promises.push(browser.session.send('Browser.setBrowserProxy', toJugglerProxyOptions(options.proxy)));
     await Promise.all(promises);
     return browser;
   }
 
-  constructor(connection: FFConnection, options: BrowserOptions) {
-    super(options);
+  constructor(parent: SdkObject, connection: FFConnection, options: BrowserOptions) {
+    super(parent, options);
     this._connection = connection;
+    this.session = connection.rootSession;
     this._ffPages = new Map();
     this._contexts = new Map();
     this._connection.on(ConnectionEvents.Disconnected, () => this._onDisconnect());
-    this._connection.on('Browser.attachedToTarget', this._onAttachedToTarget.bind(this));
-    this._connection.on('Browser.detachedFromTarget', this._onDetachedFromTarget.bind(this));
-    this._connection.on('Browser.downloadCreated', this._onDownloadCreated.bind(this));
-    this._connection.on('Browser.downloadFinished', this._onDownloadFinished.bind(this));
-    this._connection.on('Browser.videoRecordingFinished', this._onVideoRecordingFinished.bind(this));
+    this.session.on('Browser.attachedToTarget', this._onAttachedToTarget.bind(this));
+    this.session.on('Browser.detachedFromTarget', this._onDetachedFromTarget.bind(this));
+    this.session.on('Browser.downloadCreated', this._onDownloadCreated.bind(this));
+    this.session.on('Browser.downloadFinished', this._onDownloadFinished.bind(this));
+    this.session.on('Browser.videoRecordingFinished', this._onVideoRecordingFinished.bind(this));
   }
 
   async _initVersion() {
-    const result = await this._connection.send('Browser.getInfo');
+    const result = await this.session.send('Browser.getInfo');
     this._version = result.version.substring(result.version.indexOf('/') + 1);
     this._userAgent = result.userAgent;
   }
@@ -76,11 +88,10 @@ export class FFBrowser extends Browser {
     return !this._connection._closed;
   }
 
-  async newContext(options: types.BrowserContextOptions): Promise<BrowserContext> {
-    validateBrowserContextOptions(options, this.options);
+  async doCreateNewContext(options: channels.BrowserNewContextParams): Promise<BrowserContext> {
     if (options.isMobile)
       throw new Error('options.isMobile is not supported in Firefox');
-    const { browserContextId } = await this._connection.send('Browser.createBrowserContext', { removeOnDetach: true });
+    const { browserContextId } = await this.session.send('Browser.createBrowserContext', { removeOnDetach: true });
     const context = new FFBrowserContext(this, browserContextId, options);
     await context._initialize();
     this._contexts.set(browserContextId, context);
@@ -117,10 +128,13 @@ export class FFBrowser extends Browser {
   }
 
   _onDownloadCreated(payload: Protocol.Browser.downloadCreatedPayload) {
-    const ffPage = this._ffPages.get(payload.pageTargetId)!;
-    assert(ffPage);
+    const ffPage = this._ffPages.get(payload.pageTargetId);
     if (!ffPage)
       return;
+
+    // Abort the navigation that turned into download.
+    ffPage._page._frameManager.frameAbortedNavigation(payload.frameId, 'Download is starting');
+
     let originPage = ffPage._initializedPage;
     // If it's a new window download, report it on the opener page.
     if (!originPage) {
@@ -146,8 +160,11 @@ export class FFBrowser extends Browser {
 
   _onDisconnect() {
     for (const video of this._idToVideo.values())
-      video.artifact.reportFinished(kBrowserClosedError);
+      video.artifact.reportFinished(new TargetClosedError());
     this._idToVideo.clear();
+    for (const ffPage of this._ffPages.values())
+      ffPage.didClose();
+    this._ffPages.clear();
     this._didClose();
   }
 }
@@ -155,44 +172,47 @@ export class FFBrowser extends Browser {
 export class FFBrowserContext extends BrowserContext {
   declare readonly _browser: FFBrowser;
 
-  constructor(browser: FFBrowser, browserContextId: string | undefined, options: types.BrowserContextOptions) {
+  constructor(browser: FFBrowser, browserContextId: string | undefined, options: channels.BrowserNewContextParams) {
     super(browser, options, browserContextId);
   }
 
   override async _initialize() {
     assert(!this._ffPages().length);
     const browserContextId = this._browserContextId;
-    const promises: Promise<any>[] = [ super._initialize() ];
-    promises.push(this._browser._connection.send('Browser.setDownloadOptions', {
-      browserContextId,
-      downloadOptions: {
-        behavior: this._options.acceptDownloads ? 'saveToDisk' : 'cancel',
-        downloadsDir: this._browser.options.downloadsPath,
-      },
-    }));
+    const promises: Promise<any>[] = [
+      super._initialize(),
+      this._browser.session.send('Browser.addBinding', { browserContextId: this._browserContextId, name: PageBinding.kPlaywrightBinding, script: '' }),
+    ];
+    if (this._options.acceptDownloads !== 'internal-browser-default') {
+      promises.push(this._browser.session.send('Browser.setDownloadOptions', {
+        browserContextId,
+        downloadOptions: {
+          behavior: this._options.acceptDownloads === 'accept' ? 'saveToDisk' : 'cancel',
+          downloadsDir: this._browser.options.downloadsPath,
+        },
+      }));
+    }
     if (this._options.viewport) {
       const viewport = {
         viewportSize: { width: this._options.viewport.width, height: this._options.viewport.height },
         deviceScaleFactor: this._options.deviceScaleFactor || 1,
       };
-      promises.push(this._browser._connection.send('Browser.setDefaultViewport', { browserContextId, viewport }));
+      promises.push(this._browser.session.send('Browser.setDefaultViewport', { browserContextId, viewport }));
     }
     if (this._options.hasTouch)
-      promises.push(this._browser._connection.send('Browser.setTouchOverride', { browserContextId, hasTouch: true }));
+      promises.push(this._browser.session.send('Browser.setTouchOverride', { browserContextId, hasTouch: true }));
     if (this._options.userAgent)
-      promises.push(this._browser._connection.send('Browser.setUserAgentOverride', { browserContextId, userAgent: this._options.userAgent }));
+      promises.push(this._browser.session.send('Browser.setUserAgentOverride', { browserContextId, userAgent: this._options.userAgent }));
     if (this._options.bypassCSP)
-      promises.push(this._browser._connection.send('Browser.setBypassCSP', { browserContextId, bypassCSP: true }));
+      promises.push(this._browser.session.send('Browser.setBypassCSP', { browserContextId, bypassCSP: true }));
     if (this._options.ignoreHTTPSErrors)
-      promises.push(this._browser._connection.send('Browser.setIgnoreHTTPSErrors', { browserContextId, ignoreHTTPSErrors: true }));
+      promises.push(this._browser.session.send('Browser.setIgnoreHTTPSErrors', { browserContextId, ignoreHTTPSErrors: true }));
     if (this._options.javaScriptEnabled === false)
-      promises.push(this._browser._connection.send('Browser.setJavaScriptDisabled', { browserContextId, javaScriptDisabled: true }));
+      promises.push(this._browser.session.send('Browser.setJavaScriptDisabled', { browserContextId, javaScriptDisabled: true }));
     if (this._options.locale)
-      promises.push(this._browser._connection.send('Browser.setLocaleOverride', { browserContextId, locale: this._options.locale }));
+      promises.push(this._browser.session.send('Browser.setLocaleOverride', { browserContextId, locale: this._options.locale }));
     if (this._options.timezoneId)
-      promises.push(this._browser._connection.send('Browser.setTimezoneOverride', { browserContextId, timezoneId: this._options.timezoneId }));
-    if (this._options.permissions)
-      promises.push(this.grantPermissions(this._options.permissions));
+      promises.push(this._browser.session.send('Browser.setTimezoneOverride', { browserContextId, timezoneId: this._options.timezoneId }));
     if (this._options.extraHTTPHeaders || this._options.locale)
       promises.push(this.setExtraHTTPHeaders(this._options.extraHTTPHeaders || []));
     if (this._options.httpCredentials)
@@ -201,21 +221,27 @@ export class FFBrowserContext extends BrowserContext {
       promises.push(this.setGeolocation(this._options.geolocation));
     if (this._options.offline)
       promises.push(this.setOffline(this._options.offline));
-    promises.push(this._browser._connection.send('Browser.setColorScheme', {
-      browserContextId,
-      colorScheme: this._options.colorScheme !== undefined  ? this._options.colorScheme : 'light',
-    }));
-    promises.push(this._browser._connection.send('Browser.setReducedMotion', {
-      browserContextId,
-      reducedMotion: this._options.reducedMotion !== undefined  ? this._options.reducedMotion : 'no-preference',
-    }));
-    promises.push(this._browser._connection.send('Browser.setForcedColors', {
-      browserContextId,
-      forcedColors: this._options.forcedColors !== undefined  ? this._options.forcedColors : 'none',
-    }));
+    if (this._options.colorScheme !== 'no-override') {
+      promises.push(this._browser.session.send('Browser.setColorScheme', {
+        browserContextId,
+        colorScheme: this._options.colorScheme !== undefined  ? this._options.colorScheme : 'light',
+      }));
+    }
+    if (this._options.reducedMotion !== 'no-override') {
+      promises.push(this._browser.session.send('Browser.setReducedMotion', {
+        browserContextId,
+        reducedMotion: this._options.reducedMotion !== undefined  ? this._options.reducedMotion : 'no-preference',
+      }));
+    }
+    if (this._options.forcedColors !== 'no-override') {
+      promises.push(this._browser.session.send('Browser.setForcedColors', {
+        browserContextId,
+        forcedColors: this._options.forcedColors !== undefined  ? this._options.forcedColors : 'none',
+      }));
+    }
     if (this._options.recordVideo) {
       promises.push(this._ensureVideosPath().then(() => {
-        return this._browser._connection.send('Browser.setVideoRecordingOptions', {
+        return this._browser.session.send('Browser.setVideoRecordingOptions', {
           // validateBrowserContextOptions ensures correct video size.
           options: {
             ...this._options.recordVideo!.size!,
@@ -226,7 +252,7 @@ export class FFBrowserContext extends BrowserContext {
       }));
     }
     if (this._options.proxy) {
-      promises.push(this._browser._connection.send('Browser.setContextProxy', {
+      promises.push(this._browser.session.send('Browser.setContextProxy', {
         browserContextId: this._browserContextId,
         ...toJugglerProxyOptions(this._options.proxy)
       }));
@@ -245,7 +271,7 @@ export class FFBrowserContext extends BrowserContext {
 
   async newPageDelegate(): Promise<PageDelegate> {
     assertBrowserContextIsNotOwned(this);
-    const { targetId } = await this._browser._connection.send('Browser.newPage', {
+    const { targetId } = await this._browser.session.send('Browser.newPage', {
       browserContextId: this._browserContextId
     }).catch(e =>  {
       if (e.message.includes('Failed to override timezone'))
@@ -255,29 +281,29 @@ export class FFBrowserContext extends BrowserContext {
     return this._browser._ffPages.get(targetId)!;
   }
 
-  async _doCookies(urls: string[]): Promise<types.NetworkCookie[]> {
-    const { cookies } = await this._browser._connection.send('Browser.getCookies', { browserContextId: this._browserContextId });
+  async doGetCookies(urls: string[]): Promise<channels.NetworkCookie[]> {
+    const { cookies } = await this._browser.session.send('Browser.getCookies', { browserContextId: this._browserContextId });
     return network.filterCookies(cookies.map(c => {
       const copy: any = { ... c };
       delete copy.size;
       delete copy.session;
-      return copy as types.NetworkCookie;
+      return copy as channels.NetworkCookie;
     }), urls);
   }
 
-  async addCookies(cookies: types.SetNetworkCookieParam[]) {
+  async addCookies(cookies: channels.SetNetworkCookie[]) {
     const cc = network.rewriteCookies(cookies).map(c => ({
       ...c,
-      expires: c.expires && c.expires !== -1 ? c.expires : undefined,
+      expires: c.expires === -1 ? undefined : c.expires,
     }));
-    await this._browser._connection.send('Browser.setCookies', { browserContextId: this._browserContextId, cookies: cc });
+    await this._browser.session.send('Browser.setCookies', { browserContextId: this._browserContextId, cookies: cc });
   }
 
-  async clearCookies() {
-    await this._browser._connection.send('Browser.clearCookies', { browserContextId: this._browserContextId });
+  async doClearCookies() {
+    await this._browser.session.send('Browser.clearCookies', { browserContextId: this._browserContextId });
   }
 
-  async _doGrantPermissions(origin: string, permissions: string[]) {
+  async doGrantPermissions(origin: string, permissions: string[]) {
     const webPermissionToProtocol = new Map<string, 'geo' | 'desktop-notification' | 'persistent-storage' | 'push'>([
       ['geolocation', 'geo'],
       ['persistent-storage', 'persistent-storage'],
@@ -290,17 +316,17 @@ export class FFBrowserContext extends BrowserContext {
         throw new Error('Unknown permission: ' + permission);
       return protocolPermission;
     });
-    await this._browser._connection.send('Browser.grantPermissions', { origin: origin, browserContextId: this._browserContextId, permissions: filtered });
+    await this._browser.session.send('Browser.grantPermissions', { origin: origin, browserContextId: this._browserContextId, permissions: filtered });
   }
 
-  async _doClearPermissions() {
-    await this._browser._connection.send('Browser.resetPermissions', { browserContextId: this._browserContextId });
+  async doClearPermissions() {
+    await this._browser.session.send('Browser.resetPermissions', { browserContextId: this._browserContextId });
   }
 
   async setGeolocation(geolocation?: types.Geolocation): Promise<void> {
     verifyGeolocation(geolocation);
     this._options.geolocation = geolocation;
-    await this._browser._connection.send('Browser.setGeolocationOverride', { browserContextId: this._browserContextId, geolocation: geolocation || null });
+    await this._browser.session.send('Browser.setGeolocationOverride', { browserContextId: this._browserContextId, geolocation: geolocation || null });
   }
 
   async setExtraHTTPHeaders(headers: types.HeadersArray): Promise<void> {
@@ -308,41 +334,74 @@ export class FFBrowserContext extends BrowserContext {
     let allHeaders = this._options.extraHTTPHeaders;
     if (this._options.locale)
       allHeaders = network.mergeHeaders([allHeaders, network.singleHeader('Accept-Language', this._options.locale)]);
-    await this._browser._connection.send('Browser.setExtraHTTPHeaders', { browserContextId: this._browserContextId, headers: allHeaders });
+    await this._browser.session.send('Browser.setExtraHTTPHeaders', { browserContextId: this._browserContextId, headers: allHeaders });
+  }
+
+  async setUserAgent(userAgent: string | undefined): Promise<void> {
+    await this._browser.session.send('Browser.setUserAgentOverride', { browserContextId: this._browserContextId, userAgent: userAgent || null });
   }
 
   async setOffline(offline: boolean): Promise<void> {
     this._options.offline = offline;
-    await this._browser._connection.send('Browser.setOnlineOverride', { browserContextId: this._browserContextId, override: offline ? 'offline' : 'online' });
+    await this._browser.session.send('Browser.setOnlineOverride', { browserContextId: this._browserContextId, override: offline ? 'offline' : 'online' });
   }
 
-  async _doSetHTTPCredentials(httpCredentials?: types.Credentials): Promise<void> {
+  async doSetHTTPCredentials(httpCredentials?: types.Credentials): Promise<void> {
     this._options.httpCredentials = httpCredentials;
-    await this._browser._connection.send('Browser.setHTTPCredentials', { browserContextId: this._browserContextId, credentials: httpCredentials || null });
+    let credentials = null;
+    if (httpCredentials) {
+      const { username, password, origin } = httpCredentials;
+      credentials = { username, password, origin };
+    }
+    await this._browser.session.send('Browser.setHTTPCredentials', { browserContextId: this._browserContextId, credentials });
   }
 
-  async _doAddInitScript(source: string) {
-    await this._browser._connection.send('Browser.addScriptToEvaluateOnNewDocument', { browserContextId: this._browserContextId, script: source });
+  async doAddInitScript(initScript: InitScript) {
+    await this._updateInitScripts();
   }
 
-  async _doExposeBinding(binding: PageBinding) {
-    await this._browser._connection.send('Browser.addBinding', { browserContextId: this._browserContextId, name: binding.name, script: binding.source });
+  async doRemoveNonInternalInitScripts() {
+    await this._updateInitScripts();
   }
 
-  async _doUpdateRequestInterception(): Promise<void> {
-    await this._browser._connection.send('Browser.setRequestInterception', { browserContextId: this._browserContextId, enabled: !!this._requestInterceptor });
+  private async _updateInitScripts() {
+    const bindingScripts = [...this._pageBindings.values()].map(binding => binding.initScript.source);
+    const initScripts = this.initScripts.map(script => script.source);
+    await this._browser.session.send('Browser.setInitScripts', { browserContextId: this._browserContextId, scripts: [...bindingScripts, ...initScripts].map(script => ({ script })) });
   }
 
-  _onClosePersistent() {}
-
-  async _doClose() {
-    assert(this._browserContextId);
-    await this._browser._connection.send('Browser.removeBrowserContext', { browserContextId: this._browserContextId });
-    this._browser._contexts.delete(this._browserContextId);
+  async doUpdateRequestInterception(): Promise<void> {
+    await Promise.all([
+      this._browser.session.send('Browser.setRequestInterception', { browserContextId: this._browserContextId, enabled: !!this._requestInterceptor }),
+      this._browser.session.send('Browser.setCacheDisabled', { browserContextId: this._browserContextId, cacheDisabled: !!this._requestInterceptor }),
+    ]);
   }
 
-  async _doCancelDownload(uuid: string) {
-    await this._browser._connection.send('Browser.cancelDownload', { uuid });
+  onClosePersistent() {}
+
+  override async clearCache(): Promise<void> {
+    // Clearing only the context cache does not work: https://bugzilla.mozilla.org/show_bug.cgi?id=1819147
+    await this._browser.session.send('Browser.clearCache');
+  }
+
+  async doClose(reason: string | undefined) {
+    if (!this._browserContextId) {
+      if (this._options.recordVideo) {
+        await this._browser.session.send('Browser.setVideoRecordingOptions', {
+          options: undefined,
+          browserContextId: this._browserContextId
+        });
+      }
+      // Closing persistent context should close the browser.
+      await this._browser.close({ reason });
+    } else {
+      await this._browser.session.send('Browser.removeBrowserContext', { browserContextId: this._browserContextId });
+      this._browser._contexts.delete(this._browserContextId);
+    }
+  }
+
+  async cancelDownload(uuid: string) {
+    await this._browser.session.send('Browser.cancelDownload', { uuid });
   }
 }
 
@@ -371,3 +430,8 @@ function toJugglerProxyOptions(proxy: types.ProxySettings) {
     password: proxy.password
   };
 }
+
+// Prefs for quick fixes that didn't make it to the build.
+// Should all be moved to `playwright.cfg`.
+const kBandaidFirefoxUserPrefs = {};
+

@@ -15,14 +15,12 @@
  * limitations under the License.
  */
 
-import { test as it, expect } from './pageTest';
+import type { Page } from '@playwright/test';
+import { test as it, expect, rafraf } from './pageTest';
 
-async function giveItAChanceToResolve(page) {
-  for (let i = 0; i < 5; i++)
-    await page.evaluate(() => new Promise(f => requestAnimationFrame(() => requestAnimationFrame(f))));
-}
+const giveItAChanceToResolve = (page: Page) => rafraf(page, 5);
 
-it('should select single option #smoke', async ({ page, server }) => {
+it('should select single option @smoke', async ({ page, server }) => {
   await page.goto(server.PREFIX + '/input/select.html');
   await page.selectOption('select', 'blue');
   expect(await page.evaluate(() => window['result'].onInput)).toEqual(['blue']);
@@ -32,6 +30,13 @@ it('should select single option #smoke', async ({ page, server }) => {
 it('should select single option by value', async ({ page, server }) => {
   await page.goto(server.PREFIX + '/input/select.html');
   await page.selectOption('select', { value: 'blue' });
+  expect(await page.evaluate(() => window['result'].onInput)).toEqual(['blue']);
+  expect(await page.evaluate(() => window['result'].onChange)).toEqual(['blue']);
+});
+
+it('should fall back to selecting by label', async ({ page, server }) => {
+  await page.goto(server.PREFIX + '/input/select.html');
+  await page.selectOption('select', 'Blue');
   expect(await page.evaluate(() => window['result'].onInput)).toEqual(['blue']);
   expect(await page.evaluate(() => window['result'].onChange)).toEqual(['blue']);
 });
@@ -68,7 +73,7 @@ it('should not select single option when some attributes do not match', async ({
   await page.goto(server.PREFIX + '/input/select.html');
   await page.$eval('select', s => s.value = undefined);
   try {
-    await page.selectOption('select', { value: 'green', label: 'Brown' }, { timeout: 300 });
+    await page.selectOption('select', { value: 'green', label: 'Brown' }, { timeout: 1000 });
   } catch (e) {
     expect(e.message).toContain('Timeout');
   }
@@ -108,26 +113,6 @@ it('should select multiple options with attributes', async ({ page, server }) =>
   expect(await page.evaluate(() => window['result'].onChange)).toEqual(['blue', 'gray', 'green']);
 });
 
-it('should select options with sibling label', async ({ page, server }) => {
-  await page.setContent(`<label for=pet-select>Choose a pet</label>
-    <select id='pet-select'>
-      <option value='dog'>Dog</option>
-      <option value='cat'>Cat</option>
-    </select>`);
-  await page.selectOption('text=Choose a pet', 'cat');
-  expect(await page.$eval('select', select => select.options[select.selectedIndex].text)).toEqual('Cat');
-});
-
-it('should select options with outer label', async ({ page, server }) => {
-  await page.setContent(`<label for=pet-select>Choose a pet
-    <select id='pet-select'>
-      <option value='dog'>Dog</option>
-      <option value='cat'>Cat</option>
-    </select></label>`);
-  await page.selectOption('text=Choose a pet', 'cat');
-  expect(await page.$eval('select', select => select.options[select.selectedIndex].text)).toEqual('Cat');
-});
-
 it('should respect event bubbling', async ({ page, server }) => {
   await page.goto(server.PREFIX + '/input/select.html');
   await page.selectOption('select', 'blue');
@@ -151,50 +136,50 @@ it('should return [] on no matched values', async ({ page, server }) => {
 it('should return an array of matched values', async ({ page, server }) => {
   await page.goto(server.PREFIX + '/input/select.html');
   await page.evaluate(() => window['makeMultiple']());
-  const result = await page.selectOption('select', ['blue','black','magenta']);
-  expect(result.reduce((accumulator,current) => ['blue', 'black', 'magenta'].includes(current) && accumulator, true)).toEqual(true);
+  const result = await page.selectOption('select', ['blue', 'black', 'magenta']);
+  expect(result.reduce((accumulator, current) => ['blue', 'black', 'magenta'].includes(current) && accumulator, true)).toEqual(true);
 });
 
 it('should return an array of one element when multiple is not set', async ({ page, server }) => {
   await page.goto(server.PREFIX + '/input/select.html');
-  const result = await page.selectOption('select',['42','blue','black','magenta']);
+  const result = await page.selectOption('select', ['42', 'blue', 'black', 'magenta']);
   expect(result.length).toEqual(1);
 });
 
-it('should return [] on no values',async ({ page, server }) => {
+it('should return [] on no values', async ({ page, server }) => {
   await page.goto(server.PREFIX + '/input/select.html');
   const result = await page.selectOption('select', []);
   expect(result).toEqual([]);
 });
 
-it('should not allow null items',async ({ page, server }) => {
+it('should not allow null items', async ({ page, server }) => {
   await page.goto(server.PREFIX + '/input/select.html');
   await page.evaluate(() => window['makeMultiple']());
   let error = null;
-  await page.selectOption('select', ['blue', null, 'black','magenta']).catch(e => error = e);
+  await page.selectOption('select', ['blue', null, 'black', 'magenta']).catch(e => error = e);
   expect(error.message).toContain('options[1]: expected object, got null');
 });
 
-it('should unselect with null',async ({ page, server }) => {
+it('should unselect with null', async ({ page, server }) => {
   await page.goto(server.PREFIX + '/input/select.html');
   await page.evaluate(() => window['makeMultiple']());
-  const result = await page.selectOption('select', ['blue', 'black','magenta']);
-  expect(result.reduce((accumulator,current) => ['blue', 'black', 'magenta'].includes(current) && accumulator, true)).toEqual(true);
+  const result = await page.selectOption('select', ['blue', 'black', 'magenta']);
+  expect(result.reduce((accumulator, current) => ['blue', 'black', 'magenta'].includes(current) && accumulator, true)).toEqual(true);
   await page.selectOption('select', null);
   expect(await page.$eval('select', select => Array.from(select.options).every(option => !option.selected))).toEqual(true);
 });
 
-it('should deselect all options when passed no values for a multiple select',async ({ page, server }) => {
+it('should deselect all options when passed no values for a multiple select', async ({ page, server }) => {
   await page.goto(server.PREFIX + '/input/select.html');
   await page.evaluate(() => window['makeMultiple']());
-  await page.selectOption('select', ['blue','black','magenta']);
+  await page.selectOption('select', ['blue', 'black', 'magenta']);
   await page.selectOption('select', []);
   expect(await page.$eval('select', select => Array.from(select.options).every(option => !option.selected))).toEqual(true);
 });
 
-it('should deselect all options when passed no values for a select without multiple',async ({ page, server }) => {
+it('should deselect all options when passed no values for a select without multiple', async ({ page, server }) => {
   await page.goto(server.PREFIX + '/input/select.html');
-  await page.selectOption('select', ['blue','black','magenta']);
+  await page.selectOption('select', ['blue', 'black', 'magenta']);
   await page.selectOption('select', []);
   expect(await page.$eval('select', select => Array.from(select.options).every(option => !option.selected))).toEqual(true);
 });
@@ -248,11 +233,11 @@ it('should work when re-defining top-level Event class', async ({ page, server }
   expect(await page.evaluate(() => window['result'].onChange)).toEqual(['blue']);
 });
 
-it('should wait for option to be present',async ({ page, server }) => {
+it('should wait for option to be present', async ({ page, server }) => {
   await page.goto(server.PREFIX + '/input/select.html');
   const selectPromise  = page.selectOption('select', 'scarlet');
   let didSelect = false;
-  selectPromise.then(() => didSelect = true);
+  void selectPromise.then(() => didSelect = true);
   await giveItAChanceToResolve(page);
   expect(didSelect).toBe(false);
   await page.$eval('select', select => {
@@ -265,12 +250,12 @@ it('should wait for option to be present',async ({ page, server }) => {
   expect(items).toStrictEqual(['scarlet']);
 });
 
-it('should wait for option index to be present',async ({ page, server }) => {
+it('should wait for option index to be present', async ({ page, server }) => {
   await page.goto(server.PREFIX + '/input/select.html');
   const len = await page.$eval('select', select => select.options.length);
   const selectPromise  = page.selectOption('select', { index: len });
   let didSelect = false;
-  selectPromise.then(() => didSelect = true);
+  void selectPromise.then(() => didSelect = true);
   await giveItAChanceToResolve(page);
   expect(didSelect).toBe(false);
   await page.$eval('select', select => {
@@ -283,12 +268,12 @@ it('should wait for option index to be present',async ({ page, server }) => {
   expect(items).toStrictEqual(['scarlet']);
 });
 
-it('should wait for multiple options to be present',async ({ page, server }) => {
+it('should wait for multiple options to be present', async ({ page, server }) => {
   await page.goto(server.PREFIX + '/input/select.html');
   await page.evaluate(() => window['makeMultiple']());
   const selectPromise  = page.selectOption('select', ['green', 'scarlet']);
   let didSelect = false;
-  selectPromise.then(() => didSelect = true);
+  void selectPromise.then(() => didSelect = true);
   await giveItAChanceToResolve(page);
   expect(didSelect).toBe(false);
   await page.$eval('select', select => {
@@ -299,4 +284,38 @@ it('should wait for multiple options to be present',async ({ page, server }) => 
   });
   const items = await selectPromise;
   expect(items).toStrictEqual(['green', 'scarlet']);
+});
+
+it('input event.composed should be true and cross shadow dom boundary', async ({ page, server }) => {
+  it.info().annotations.push({ type: 'issue', description: 'https://github.com/microsoft/playwright/issues/28726' });
+  await page.goto(server.EMPTY_PAGE);
+  await page.setContent(`<body><script>
+  const div = document.createElement('div');
+  const shadowRoot = div.attachShadow({mode: 'open'});
+  shadowRoot.innerHTML = \`<select>
+    <option value="black">Black</option>
+    <option value="blue">Blue</option>
+  </select>\`;
+  document.body.appendChild(div);
+</script></body>`);
+  await page.locator('body').evaluate(select => {
+    (window as any).firedBodyEvents = [];
+    for (const event of ['input', 'change']) {
+      select.addEventListener(event, e => {
+        (window as any).firedBodyEvents.push(e.type + ':' + e.composed);
+      }, false);
+    }
+  });
+
+  await page.locator('select').evaluate(select => {
+    (window as any).firedEvents = [];
+    for (const event of ['input', 'change']) {
+      select.addEventListener(event, e => {
+        (window as any).firedEvents.push(e.type + ':' + e.composed);
+      }, false);
+    }
+  });
+  await page.selectOption('select', 'blue');
+  expect(await page.evaluate(() => window['firedEvents'])).toEqual(['input:true', 'change:false']);
+  expect(await page.evaluate(() => window['firedBodyEvents'])).toEqual(['input:true']);
 });

@@ -14,76 +14,119 @@
   limitations under the License.
 */
 
-import type { TestAttachment, TestCase, TestResult, TestStep } from '@playwright/test/src/reporters/html';
-import ansi2html from 'ansi-to-html';
+import type { TestAttachment, TestCase, TestResult, TestStep } from './types';
 import * as React from 'react';
 import { TreeItem } from './treeItem';
-import { TabbedPane } from './tabbedPane';
-import { msToString } from './uiUtils';
+import { msToString } from './utils';
 import { AutoChip } from './chip';
 import { traceImage } from './images';
-import { AttachmentLink } from './links';
+import { AttachmentLink, generateTraceUrl } from './links';
 import { statusIcon } from './statusIcon';
+import type { ImageDiff } from '@web/shared/imageDiffView';
+import { ImageDiffView } from '@web/shared/imageDiffView';
+import { TestErrorView } from './testErrorView';
 import './testResultView.css';
 
-const imageDiffNames = ['expected', 'actual', 'diff'];
+function groupImageDiffs(screenshots: Set<TestAttachment>): ImageDiff[] {
+  const snapshotNameToImageDiff = new Map<string, ImageDiff>();
+  for (const attachment of screenshots) {
+    const match = attachment.name.match(/^(.*)-(expected|actual|diff|previous)(\.[^.]+)?$/);
+    if (!match)
+      continue;
+    const [, name, category, extension = ''] = match;
+    const snapshotName = name + extension;
+    let imageDiff = snapshotNameToImageDiff.get(snapshotName);
+    if (!imageDiff) {
+      imageDiff = { name: snapshotName };
+      snapshotNameToImageDiff.set(snapshotName, imageDiff);
+    }
+    if (category === 'actual')
+      imageDiff.actual = { attachment };
+    if (category === 'expected')
+      imageDiff.expected = { attachment, title: 'Expected' };
+    if (category === 'previous')
+      imageDiff.expected = { attachment, title: 'Previous' };
+    if (category === 'diff')
+      imageDiff.diff = { attachment };
+  }
+  for (const [name, diff] of snapshotNameToImageDiff) {
+    if (!diff.actual || !diff.expected) {
+      snapshotNameToImageDiff.delete(name);
+    } else {
+      screenshots.delete(diff.actual.attachment);
+      screenshots.delete(diff.expected.attachment);
+      screenshots.delete(diff.diff?.attachment!);
+    }
+  }
+  return [...snapshotNameToImageDiff.values()];
+}
 
 export const TestResultView: React.FC<{
   test: TestCase,
   result: TestResult,
-}> = ({ result }) => {
+  anchor: 'video' | 'diff' | '',
+}> = ({ result, anchor }) => {
 
-  const { screenshots, videos, traces, otherAttachments, attachmentsMap } = React.useMemo(() => {
-    const attachmentsMap = new Map<string, TestAttachment>();
+  const { screenshots, videos, traces, otherAttachments, diffs } = React.useMemo(() => {
     const attachments = result?.attachments || [];
-    const otherAttachments = new Set<TestAttachment>(attachments);
-    const screenshots = attachments.filter(a => a.contentType.startsWith('image/') && !imageDiffNames.includes(a.name));
+    const screenshots = new Set(attachments.filter(a => a.contentType.startsWith('image/')));
     const videos = attachments.filter(a => a.name === 'video');
     const traces = attachments.filter(a => a.name === 'trace');
-    for (const a of attachments)
-      attachmentsMap.set(a.name, a);
+    const otherAttachments = new Set<TestAttachment>(attachments);
     [...screenshots, ...videos, ...traces].forEach(a => otherAttachments.delete(a));
-    return { attachmentsMap, screenshots, videos, otherAttachments, traces };
-  }, [ result ]);
+    const diffs = groupImageDiffs(screenshots);
+    return { screenshots: [...screenshots], videos, traces, otherAttachments, diffs };
+  }, [result]);
 
-  const expected = attachmentsMap.get('expected');
-  const actual = attachmentsMap.get('actual');
-  const diff = attachmentsMap.get('diff');
-  const hasImages = [actual?.contentType, expected?.contentType, diff?.contentType].some(v => v && /^image\//i.test(v));
+  const videoRef = React.useRef<HTMLDivElement>(null);
+  const imageDiffRef = React.useRef<HTMLDivElement>(null);
+
+  const [scrolled, setScrolled] = React.useState(false);
+  React.useEffect(() => {
+    if (scrolled)
+      return;
+    setScrolled(true);
+    if (anchor === 'video')
+      videoRef.current?.scrollIntoView({ block: 'start', inline: 'start' });
+    if (anchor === 'diff')
+      imageDiffRef.current?.scrollIntoView({ block: 'start', inline: 'start' });
+  }, [scrolled, anchor, setScrolled, videoRef]);
+
   return <div className='test-result'>
-    {result.error && <AutoChip header='Errors'>
-      <ErrorMessage key='test-result-error-message' error={result.error}></ErrorMessage>
+    {!!result.errors.length && <AutoChip header='Errors'>
+      {result.errors.map((error, index) => <TestErrorView key={'test-result-error-message-' + index} error={error}></TestErrorView>)}
     </AutoChip>}
     {!!result.steps.length && <AutoChip header='Test Steps'>
       {result.steps.map((step, i) => <StepTreeItem key={`step-${i}`} step={step} depth={0}></StepTreeItem>)}
     </AutoChip>}
 
-    {expected && actual && <AutoChip header={`${hasImages ? 'Image' : 'Snapshot'} mismatch`}>
-      {hasImages && <ImageDiff actual={actual} expected={expected} diff={diff}></ImageDiff>}
-      <AttachmentLink key={`expected`} attachment={expected}></AttachmentLink>
-      <AttachmentLink key={`actual`} attachment={actual}></AttachmentLink>
-      {diff && <AttachmentLink key={`diff`} attachment={diff}></AttachmentLink>}
-    </AutoChip>}
+    {diffs.map((diff, index) =>
+      <AutoChip key={`diff-${index}`} header={`Image mismatch: ${diff.name}`} targetRef={imageDiffRef}>
+        <ImageDiffView key='image-diff' diff={diff}></ImageDiffView>
+      </AutoChip>
+    )}
 
     {!!screenshots.length && <AutoChip header='Screenshots'>
       {screenshots.map((a, i) => {
         return <div key={`screenshot-${i}`}>
-          <img src={a.path} />
+          <a href={a.path}>
+            <img className='screenshot' src={a.path} />
+          </a>
           <AttachmentLink attachment={a}></AttachmentLink>
         </div>;
       })}
     </AutoChip>}
 
     {!!traces.length && <AutoChip header='Traces'>
-      {traces.map((a, i) => <div key={`trace-${i}`}>
-        <a href={`trace/index.html?trace=${new URL(a.path!, window.location.href)}`}>
-          <img src={traceImage} style={{ width: 192, height: 117, marginLeft: 20 }} />
+      {<div>
+        <a href={generateTraceUrl(traces)}>
+          <img className='screenshot' src={traceImage} style={{ width: 192, height: 117, marginLeft: 20 }} />
         </a>
-        <AttachmentLink attachment={a}></AttachmentLink>
-      </div>)}
+        {traces.map((a, i) => <AttachmentLink key={`trace-${i}`} attachment={a} linkName={traces.length === 1 ? 'trace' : `trace-${i + 1}`}></AttachmentLink>)}
+      </div>}
     </AutoChip>}
 
-    {!!videos.length && <AutoChip header='Videos'>
+    {!!videos.length && <AutoChip header='Videos' targetRef={videoRef}>
       {videos.map((a, i) => <div key={`video-${i}`}>
         <video controls>
           <source src={a.path} type={a.contentType}/>
@@ -111,80 +154,7 @@ const StepTreeItem: React.FC<{
   </span>} loadChildren={step.steps.length + (step.snippet ? 1 : 0) ? () => {
     const children = step.steps.map((s, i) => <StepTreeItem key={i} step={s} depth={depth + 1}></StepTreeItem>);
     if (step.snippet)
-      children.unshift(<ErrorMessage key='line' error={step.snippet}></ErrorMessage>);
+      children.unshift(<TestErrorView key='line' error={step.snippet}></TestErrorView>);
     return children;
   } : undefined} depth={depth}></TreeItem>;
 };
-
-const ImageDiff: React.FunctionComponent<{
- actual: TestAttachment,
- expected: TestAttachment,
- diff?: TestAttachment,
-}> = ({ actual, expected, diff }) => {
-  const [selectedTab, setSelectedTab] = React.useState<string>('actual');
-  const diffElement = React.useRef<HTMLImageElement>(null);
-  const tabs = [];
-  tabs.push({
-    id: 'actual',
-    title: 'Actual',
-    render: () => <img src={actual.path} onLoad={() => {
-      if (diffElement.current)
-        diffElement.current.style.minHeight = diffElement.current.offsetHeight + 'px';
-    }}/>
-  });
-  tabs.push({
-    id: 'expected',
-    title: 'Expected',
-    render: () => <img src={expected.path} onLoad={() => {
-      if (diffElement.current)
-        diffElement.current.style.minHeight = diffElement.current.offsetHeight + 'px';
-    }}/>
-  });
-  if (diff) {
-    tabs.push({
-      id: 'diff',
-      title: 'Diff',
-      render: () => <img src={diff.path}/>
-    });
-  }
-  return <div className='vbox' data-testid='test-result-image-mismatch' ref={diffElement}>
-    <TabbedPane tabs={tabs} selectedTab={selectedTab} setSelectedTab={setSelectedTab} />
-  </div>;
-};
-
-const ErrorMessage: React.FC<{
-  error: string;
-}> = ({ error }) => {
-  const html = React.useMemo(() => {
-    const config: any = {
-      bg: 'var(--color-canvas-subtle)',
-      fg: 'var(--color-fg-default)',
-    };
-    config.colors = ansiColors;
-    return new ansi2html(config).toHtml(escapeHTML(error));
-  }, [error]);
-  return <div className='test-result-error-message' dangerouslySetInnerHTML={{ __html: html || '' }}></div>;
-};
-
-const ansiColors = {
-  0: '#000',
-  1: '#C00',
-  2: '#0C0',
-  3: '#C50',
-  4: '#00C',
-  5: '#C0C',
-  6: '#0CC',
-  7: '#CCC',
-  8: '#555',
-  9: '#F55',
-  10: '#5F5',
-  11: '#FF5',
-  12: '#55F',
-  13: '#F5F',
-  14: '#5FF',
-  15: '#FFF'
-};
-
-function escapeHTML(text: string): string {
-  return text.replace(/[&"<>]/g, c => ({ '&': '&amp;', '"': '&quot;', '<': '&lt;', '>': '&gt;' }[c]!));
-}

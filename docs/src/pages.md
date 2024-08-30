@@ -3,8 +3,6 @@ id: pages
 title: "Pages"
 ---
 
-<!-- TOC -->
-
 ## Pages
 
 Each [BrowserContext] can have multiple pages. A [Page] refers to a single tab or a popup window within a browser
@@ -141,41 +139,44 @@ The `page` event on browser contexts can be used to get new pages that are creat
 handle new pages opened by `target="_blank"` links.
 
 ```js
-// Get page after a specific action (e.g. clicking a link)
-const [newPage] = await Promise.all([
-  context.waitForEvent('page'),
-  page.click('a[target="_blank"]') // Opens a new tab
-])
-await newPage.waitForLoadState();
+// Start waiting for new page before clicking. Note no await.
+const pagePromise = context.waitForEvent('page');
+await page.getByText('open new tab').click();
+const newPage = await pagePromise;
+// Interact with the new page normally.
+await newPage.getByRole('button').click();
 console.log(await newPage.title());
 ```
 
 ```java
 // Get page after a specific action (e.g. clicking a link)
 Page newPage = context.waitForPage(() -> {
-  page.click("a[target='_blank']"); // Opens a new tab
+  page.getByText("open new tab").click(); // Opens a new tab
 });
-newPage.waitForLoadState();
+// Interact with the new page normally
+newPage.getByRole(AriaRole.BUTTON).click();
 System.out.println(newPage.title());
 ```
 
 ```python async
 # Get page after a specific action (e.g. clicking a link)
 async with context.expect_page() as new_page_info:
-    await page.click('a[target="_blank"]') # Opens a new tab
+    await page.get_by_text("open new tab").click() # Opens a new tab
 new_page = await new_page_info.value
 
-await new_page.wait_for_load_state()
+# Interact with the new page normally
+await new_page.get_by_role("button").click()
 print(await new_page.title())
 ```
 
 ```python sync
 # Get page after a specific action (e.g. clicking a link)
 with context.expect_page() as new_page_info:
-    page.click('a[target="_blank"]') # Opens a new tab
+    page.get_by_text("open new tab").click() # Opens a new tab
 new_page = new_page_info.value
 
-new_page.wait_for_load_state()
+# Interact with the new page normally
+new_page.get_by_role("button").click()
 print(new_page.title())
 ```
 
@@ -183,9 +184,10 @@ print(new_page.title())
 // Get page after a specific action (e.g. clicking a link)
 var newPage = await context.RunAndWaitForPageAsync(async () =>
 {
-    await page.ClickAsync("a[target='_blank']");
+    await page.GetByText("open new tab").ClickAsync();
 });
-await newPage.WaitForLoadStateAsync();
+// Interact with the new page normally
+await newPage.GetByRole(AriaRole.Button).ClickAsync();
 Console.WriteLine(await newPage.TitleAsync());
 ```
 
@@ -196,7 +198,7 @@ If the action that triggers the new page is unknown, the following pattern can b
 context.on('page', async page => {
   await page.waitForLoadState();
   console.log(await page.title());
-})
+});
 ```
 
 ```java
@@ -241,55 +243,56 @@ If the page opens a pop-up (e.g. pages opened by `target="_blank"` links), you c
 This event is emitted in addition to the `browserContext.on('page')` event, but only for popups relevant to this page.
 
 ```js
-// Note that Promise.all prevents a race condition
-// between clicking and waiting for the popup.
-const [popup] = await Promise.all([
-  // It is important to call waitForEvent before click to set up waiting.
-  page.waitForEvent('popup'),
-  // Opens popup.
-  page.locator('#open').click(),
-]);
-await popup.waitForLoadState();
+// Start waiting for popup before clicking. Note no await.
+const popupPromise = page.waitForEvent('popup');
+await page.getByText('open the popup').click();
+const popup = await popupPromise;
+// Interact with the new popup normally.
+await popup.getByRole('button').click();
 console.log(await popup.title());
 ```
 
 ```java
 // Get popup after a specific action (e.g., click)
 Page popup = page.waitForPopup(() -> {
-  page.click("#open");
+  page.getByText("open the popup").click();
 });
-popup.waitForLoadState();
+// Interact with the popup normally
+popup.getByRole(AriaRole.BUTTON).click();
 System.out.println(popup.title());
 ```
 
 ```python async
 # Get popup after a specific action (e.g., click)
 async with page.expect_popup() as popup_info:
-    await page.click("#open")
+    await page.get_by_text("open the popup").click()
 popup = await popup_info.value
 
-await popup.wait_for_load_state()
+# Interact with the popup normally
+await popup.get_by_role("button").click()
 print(await popup.title())
 ```
 
 ```python sync
 # Get popup after a specific action (e.g., click)
 with page.expect_popup() as popup_info:
-    page.click("#open")
+    page.get_by_text("open the popup").click()
 popup = popup_info.value
 
-popup.wait_for_load_state()
+# Interact with the popup normally
+popup.get_by_role("button").click()
 print(popup.title())
 ```
 
 ```csharp
 // Get popup after a specific action (e.g., click)
-var newPage = await page.RunAndWaitForPopupAsync(async () =>
+var popup = await page.RunAndWaitForPopupAsync(async () =>
 {
-    await page.ClickAsync("#open");
+    await page.GetByText("open the popup").ClickAsync();
 });
-await newPage.WaitForLoadStateAsync();
-Console.WriteLine(await newPage.TitleAsync());
+// Interact with the popup normally
+await popup.GetByRole(AriaRole.Button).ClickAsync();
+Console.WriteLine(await popup.TitleAsync());
 ```
 
 If the action that triggers the popup is unknown, the following pattern can be used.
@@ -298,8 +301,8 @@ If the action that triggers the popup is unknown, the following pattern can be u
 // Get all popups when they open
 page.on('popup', async popup => {
   await popup.waitForLoadState();
-  await popup.title();
-})
+  console.log(await popup.title());
+});
 ```
 
 ```java

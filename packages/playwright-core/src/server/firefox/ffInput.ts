@@ -15,10 +15,10 @@
  * limitations under the License.
  */
 
-import * as input from '../input';
-import { Page } from '../page';
-import * as types from '../types';
-import { FFSession } from './ffConnection';
+import type * as input from '../input';
+import type { Page } from '../page';
+import type * as types from '../types';
+import type { FFSession } from './ffConnection';
 
 function toModifiersMask(modifiers: Set<types.KeyboardModifier>): number {
   let mask = 0;
@@ -62,10 +62,6 @@ export class RawKeyboardImpl implements input.RawKeyboard {
   }
 
   async keydown(modifiers: Set<types.KeyboardModifier>, code: string, keyCode: number, keyCodeWithoutLocation: number, key: string, location: number, autoRepeat: boolean, text: string | undefined): Promise<void> {
-    if (code === 'MetaLeft')
-      code = 'OSLeft';
-    if (code === 'MetaRight')
-      code = 'OSRight';
     // Firefox will figure out Enter by itself
     if (text === '\r')
       text = '';
@@ -81,10 +77,6 @@ export class RawKeyboardImpl implements input.RawKeyboard {
   }
 
   async keyup(modifiers: Set<types.KeyboardModifier>, code: string, keyCode: number, keyCodeWithoutLocation: number, key: string, location: number): Promise<void> {
-    if (code === 'MetaLeft')
-      code = 'OSLeft';
-    if (code === 'MetaRight')
-      code = 'OSRight';
     await this._client.send('Page.dispatchKeyEvent', {
       type: 'keyup',
       key,
@@ -145,7 +137,7 @@ export class RawMouseImpl implements input.RawMouse {
 
   async wheel(x: number, y: number, buttons: Set<types.MouseButton>, modifiers: Set<types.KeyboardModifier>, deltaX: number, deltaY: number): Promise<void> {
     // Wheel events hit the compositor first, so wait one frame for it to be synced.
-    await this._page!.mainFrame().evaluateExpression(`new Promise(requestAnimationFrame)`, false, false, 'utility');
+    await this._page!.mainFrame().evaluateExpression(`new Promise(requestAnimationFrame)`, { world: 'utility' });
     await this._client.send('Page.dispatchWheelEvent', {
       deltaX,
       deltaY,

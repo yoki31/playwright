@@ -18,7 +18,7 @@ import { test, expect } from './playwright-test-fixtures';
 
 const files = {
   'match-grep/b.test.ts': `
-    const { test } = pwt;
+    import { test, expect } from '@playwright/test';
     test('test AA', () => {
       expect(1 + 1).toBe(2);
     });
@@ -32,7 +32,7 @@ const files = {
     });
   `,
   'match-grep/fdir/c.test.ts': `
-    const { test } = pwt;
+    import { test, expect } from '@playwright/test';
     test('test AA', () => {
       expect(1 + 1).toBe(2);
     });
@@ -46,7 +46,7 @@ const files = {
     });
   `,
   'match-grep/adir/a.test.ts': `
-    const { test } = pwt;
+    import { test, expect } from '@playwright/test';
     test('test AA', () => {
       expect(1 + 1).toBe(2);
     });
@@ -98,4 +98,9 @@ test('should be case insensitive by default', async ({ runInlineTest }) => {
 test('should be case sensitive by default with a regex', async ({ runInlineTest }) => {
   const result = await runInlineTest(files, { 'grep': '/TesT Cc/' });
   expect(result.passed).toBe(0);
+});
+
+test('excluded tests should not be shown in UI', async ({ runInlineTest, runTSC }) => {
+  const result = await runInlineTest(files, { 'grep': 'Test AA' });
+  expect(result.passed).toBe(3);
 });

@@ -19,7 +19,7 @@ import fs from 'fs';
 import url from 'url';
 import { expect, test as it } from './pageTest';
 
-it('should work #smoke', async ({ page, server }) => {
+it('should work @smoke', async ({ page, server }) => {
   server.setRoute('/empty.html', (req, res) => {
     res.setHeader('foo', 'bar');
     res.setHeader('BaZ', 'bAz');
@@ -32,7 +32,8 @@ it('should work #smoke', async ({ page, server }) => {
 });
 
 it('should return multiple header value', async ({ page, server, browserName, platform }) => {
-  it.fixme(browserName === 'webkit' && platform === 'win32', 'libcurl does not support non-set-cookie multivalue headers');
+  it.skip(browserName === 'webkit' && platform === 'win32', 'libcurl does not support non-set-cookie multivalue headers');
+
   server.setRoute('/headers', (req, res) => {
     // Headers array is only supported since Node v14.14.0 so we write directly to the socket.
     // res.writeHead(200, ['name-a', 'v1','name-b', 'v4','Name-a', 'v2', 'name-A', 'v3']);
@@ -109,7 +110,6 @@ it('should wait until response completes', async ({ page, server }) => {
 });
 
 it('should reject response.finished if page closes', async ({ page, server }) => {
-  it.fixme();
   await page.goto(server.EMPTY_PAGE);
   server.setRoute('/get', (req, res) => {
     // In Firefox, |fetch| will be hanging until it receives |Content-Type| header
@@ -130,7 +130,6 @@ it('should reject response.finished if page closes', async ({ page, server }) =>
 });
 
 it('should reject response.finished if context closes', async ({ page, server }) => {
-  it.fixme();
   await page.goto(server.EMPTY_PAGE);
   server.setRoute('/get', (req, res) => {
     // In Firefox, |fetch| will be hanging until it receives |Content-Type| header
@@ -179,8 +178,10 @@ it('should return status text', async ({ page, server }) => {
   expect(response.statusText()).toBe('cool!');
 });
 
-it('should report all headers', async ({ page, server, browserName, platform }) => {
-  it.fixme(browserName === 'webkit' && platform === 'win32', 'libcurl does not support non-set-cookie multivalue headers');
+it('should report all headers', async ({ page, server, browserName, platform, isElectron, browserMajorVersion }) => {
+  it.skip(isElectron && browserMajorVersion < 99, 'This needs Chromium >= 99');
+  it.skip(browserName === 'webkit' && platform === 'win32', 'libcurl does not support non-set-cookie multivalue headers');
+
   const expectedHeaders = {
     'header-a': ['value-a', 'value-a-1', 'value-a-2'],
     'header-b': ['value-b'],
@@ -213,7 +214,9 @@ it('should report all headers', async ({ page, server, browserName, platform }) 
   expect(actualHeaders).toEqual(expectedHeaders);
 });
 
-it('should report multiple set-cookie headers', async ({ page, server }) => {
+it('should report multiple set-cookie headers', async ({ page, server, isElectron, browserMajorVersion }) => {
+  it.skip(isElectron && browserMajorVersion < 99, 'This needs Chromium >= 99');
+
   server.setRoute('/headers', (req, res) => {
     res.writeHead(200, {
       'Set-Cookie': ['a=b', 'c=d']
@@ -235,9 +238,8 @@ it('should report multiple set-cookie headers', async ({ page, server }) => {
   expect(await response.headerValues('set-cookie')).toEqual(['a=b', 'c=d']);
 });
 
-it('should behave the same way for headers and allHeaders', async ({ page, server, browserName, channel, platform }) => {
-  it.fixme(browserName === 'webkit' && platform === 'win32', 'libcurl does not support non-set-cookie multivalue headers');
-  it.skip(!!channel, 'Stable chrome uses \n as a header separator in non-raw headers');
+it('should behave the same way for headers and allHeaders', async ({ page, server, browserName, platform }) => {
+  it.skip(browserName === 'webkit' && platform === 'win32', 'libcurl does not support non-set-cookie multivalue headers');
   server.setRoute('/headers', (req, res) => {
     const headers = {
       'Set-Cookie': ['a=b', 'c=d'],
@@ -268,13 +270,14 @@ it('should behave the same way for headers and allHeaders', async ({ page, serve
   expect(allHeaders['name-b']).toEqual('v4');
 });
 
-it('should provide a Response with a file URL', async ({ page, asset, isAndroid, isElectron, isWindows, browserName }) => {
+it('should provide a Response with a file URL', async ({ page, asset, isAndroid, isElectron, isWindows, browserName, mode }) => {
   it.skip(isAndroid, 'No files on Android');
-  it.fixme(browserName === 'firefox', 'Firefox does return null for file:// URLs');
+  it.skip(browserName === 'firefox', 'Firefox does return null for file:// URLs');
+  it.skip(mode.startsWith('service'));
 
   const fileurl = url.pathToFileURL(asset('frames/two-frames.html')).href;
   const response = await page.goto(fileurl);
-  if (isElectron || (browserName === 'webkit' && isWindows))
+  if (isElectron || (browserName === 'chromium') || (browserName === 'webkit' && isWindows))
     expect(response.status()).toBe(200);
   else
     expect(response.status()).toBe(0);
@@ -317,4 +320,109 @@ it('should return headers after route.fulfill', async ({ page, server }) => {
     'content-length': '4',
     'content-language': 'en'
   });
+});
+
+it('should report if request was fromServiceWorker', async ({ page, server, isAndroid, isElectron }) => {
+  it.skip(isAndroid || isElectron);
+  {
+    const res = await page.goto(server.PREFIX + '/serviceworkers/fetch/sw.html');
+    expect(res.fromServiceWorker()).toBe(false);
+  }
+  await page.evaluate(() => window['activationPromise']);
+  {
+    const [res] = await Promise.all([
+      page.waitForResponse(/example\.txt/),
+      page.evaluate(() => fetch('/example.txt')),
+    ]);
+    expect(res.fromServiceWorker()).toBe(true);
+  }
+});
+
+it('should return body for prefetch script', async ({ page, server, browserName }) => {
+  it.skip(browserName === 'webkit', 'No prefetch in WebKit: https://caniuse.com/link-rel-prefetch');
+  const [response] = await Promise.all([
+    page.waitForResponse('**/prefetch.js'),
+    page.goto(server.PREFIX + '/prefetch.html')
+  ]);
+  const body = await response.body();
+  expect(body.toString()).toBe('// Scripts will be pre-fetched');
+});
+
+it('should bypass disk cache when page interception is enabled', async ({ page, server }) => {
+  it.info().annotations.push({ type: 'issue', description: 'https://github.com/microsoft/playwright/issues/30000' });
+  await page.goto(server.PREFIX + '/frames/one-frame.html');
+  await page.route('**/api*', route => route.continue());
+  {
+    const requests = [];
+    server.setRoute('/api', (req, res) => {
+      requests.push(req);
+      res.statusCode = 200;
+      res.setHeader('content-type', 'text/plain');
+      res.setHeader('cache-control', 'public, max-age=31536000');
+      res.end('Hello');
+    });
+    for (let i = 0; i < 3; i++) {
+      await it.step(`main frame iteration ${i}`, async () => {
+        const respPromise = page.waitForResponse('**/api');
+        await page.evaluate(async () => {
+          const response = await fetch('/api');
+          return response.status;
+        });
+        const response = await respPromise;
+        expect(response.status()).toBe(200);
+        expect(requests.length).toBe(i + 1);
+      });
+    }
+  }
+
+  {
+    const requests = [];
+    server.setRoute('/frame/api', (req, res) => {
+      requests.push(req);
+      res.statusCode = 200;
+      res.setHeader('content-type', 'text/plain');
+      res.setHeader('cache-control', 'public, max-age=31536000');
+      res.end('Hello');
+    });
+    for (let i = 0; i < 3; i++) {
+      await it.step(`subframe iteration ${i}`, async () => {
+        const respPromise = page.waitForResponse('**/frame/api');
+        await page.frame({ url: '**/frame.html' }).evaluate(async () => {
+          const response = await fetch('/frame/api');
+          return response.status;
+        });
+        const response = await respPromise;
+        expect(response.status()).toBe(200);
+        expect(requests.length).toBe(i + 1);
+      });
+    }
+  }
+});
+
+it('should bypass disk cache when context interception is enabled', async ({ page, server }) => {
+  it.info().annotations.push({ type: 'issue', description: 'https://github.com/microsoft/playwright/issues/30000' });
+  await page.context().route('**/api*', route => route.continue());
+  await page.goto(server.PREFIX + '/frames/one-frame.html');
+  {
+    const requests = [];
+    server.setRoute('/api', (req, res) => {
+      requests.push(req);
+      res.statusCode = 200;
+      res.setHeader('content-type', 'text/plain');
+      res.setHeader('cache-control', 'public, max-age=31536000');
+      res.end('Hello');
+    });
+    for (let i = 0; i < 3; i++) {
+      await it.step(`main frame iteration ${i}`, async () => {
+        const respPromise = page.waitForResponse('**/api');
+        await page.evaluate(async () => {
+          const response = await fetch('/api');
+          return response.status;
+        });
+        const response = await respPromise;
+        expect(response.status()).toBe(200);
+        expect(requests.length).toBe(i + 1);
+      });
+    }
+  }
 });

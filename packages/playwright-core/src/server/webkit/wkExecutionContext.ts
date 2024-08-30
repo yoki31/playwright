@@ -15,11 +15,11 @@
  * limitations under the License.
  */
 
-import { WKSession } from './wkConnection';
-import { Protocol } from './protocol';
+import type { WKSession } from './wkConnection';
+import type { Protocol } from './protocol';
 import * as js from '../javascript';
-import { parseEvaluationResultValue } from '../common/utilityScriptSerializers';
-import { isSessionClosedError } from '../common/protocolError';
+import { parseEvaluationResultValue } from '../isomorphic/utilityScriptSerializers';
+import { isSessionClosedError } from '../protocolError';
 
 export class WKExecutionContext implements js.ExecutionContextDelegate {
   private readonly _session: WKSession;
@@ -63,7 +63,7 @@ export class WKExecutionContext implements js.ExecutionContextDelegate {
   rawCallFunctionNoReply(func: Function, ...args: any[]) {
     this._session.send('Runtime.callFunctionOn', {
       functionDeclaration: func.toString(),
-      objectId: args.find(a => a instanceof js.JSHandle)!._objectId,
+      objectId: args.find(a => a instanceof js.JSHandle)!._objectId!,
       arguments: args.map(a => a instanceof js.JSHandle ? { objectId: a._objectId } : { value: a }),
       returnByValue: true,
       emulateUserGesture: true
@@ -116,6 +116,10 @@ export class WKExecutionContext implements js.ExecutionContextDelegate {
   async releaseHandle(objectId: js.ObjectId): Promise<void> {
     await this._session.send('Runtime.releaseObject', { objectId });
   }
+
+  objectCount(objectId: js.ObjectId): Promise<number> {
+    throw new Error('Method not implemented in WebKit.');
+  }
 }
 
 function potentiallyUnserializableValue(remoteObject: Protocol.Runtime.RemoteObject): any {
@@ -142,11 +146,7 @@ function renderPreview(object: Protocol.Runtime.RemoteObject): string | undefine
       tokens.push(`${name}: ${value}`);
     return `{${tokens.join(', ')}}`;
   }
-  if (object.subtype === 'array' && object.preview) {
-    const result = [];
-    for (const { name, value } of object.preview.properties!)
-      result[+name] = value;
-    return '[' + String(result) + ']';
-  }
+  if (object.subtype === 'array' && object.preview)
+    return js.sparseArrayToString(object.preview.properties!);
   return object.description;
 }

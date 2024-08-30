@@ -3,36 +3,51 @@
   "browsers": [
     {
       "name": "chromium",
-      "revision": "956323",
-      "installByDefault": true
+      "revision": "1131",
+      "installByDefault": true,
+      "browserVersion": "128.0.6613.36"
     },
     {
-      "name": "chromium-with-symbols",
-      "revision": "956323",
-      "installByDefault": false
+      "name": "chromium-tip-of-tree",
+      "revision": "1254",
+      "installByDefault": false,
+      "browserVersion": "130.0.6681.0"
     },
     {
       "name": "firefox",
-      "revision": "1313",
-      "installByDefault": true
+      "revision": "1462",
+      "installByDefault": true,
+      "browserVersion": "129.0"
     },
     {
       "name": "firefox-beta",
-      "revision": "1314",
-      "installByDefault": false
+      "revision": "1462",
+      "installByDefault": false,
+      "browserVersion": "130.0b2"
     },
     {
       "name": "webkit",
-      "revision": "1596",
+      "revision": "2066",
       "installByDefault": true,
       "revisionOverrides": {
-        "mac10.14": "1446"
-      }
+        "mac10.14": "1446",
+        "mac10.15": "1616",
+        "mac11": "1816",
+        "mac11-arm64": "1816",
+        "mac12": "2009",
+        "mac12-arm64": "2009"
+      },
+      "browserVersion": "18.0"
     },
     {
       "name": "ffmpeg",
-      "revision": "1007",
+      "revision": "1010",
       "installByDefault": true
+    },
+    {
+      "name": "android",
+      "revision": "1001",
+      "installByDefault": false
     }
   ]
 }

@@ -32,6 +32,23 @@ it('should work for complicated objects', async ({ page, browserName }) => {
     expect(aHandle.toString()).toBe('JSHandle@object');
 });
 
+it('should beautifully render sparse arrays', async ({ page, browserName }) => {
+  const [msg] = await Promise.all([
+    page.waitForEvent('console'),
+    page.evaluateHandle(() => {
+      const a = [];
+      a[1] = 1;
+      a[10] = 2;
+      a[100] = 3;
+      console.log(a);
+    }),
+  ]);
+  if (browserName === 'firefox')
+    expect(msg.text()).toBe('Array');
+  else
+    expect(msg.text()).toBe('[empty, 1, empty x 8, 2, empty x 89, 3]');
+});
+
 it('should work for promises', async ({ page }) => {
   // wrap the promise in an object, otherwise we will await.
   const wrapperHandle = await page.evaluateHandle(() => ({ b: Promise.resolve(123) }));
@@ -39,7 +56,7 @@ it('should work for promises', async ({ page }) => {
   expect(bHandle.toString()).toBe('Promise');
 });
 
-it('should work with different subtypes #smoke', async ({ page, browserName }) => {
+it('should work with different subtypes @smoke', async ({ page, browserName }) => {
   expect((await page.evaluateHandle('(function(){})')).toString()).toContain('function');
   expect((await page.evaluateHandle('12')).toString()).toBe('12');
   expect((await page.evaluateHandle('true')).toString()).toBe('true');
@@ -54,7 +71,7 @@ it('should work with different subtypes #smoke', async ({ page, browserName }) =
   expect((await page.evaluateHandle('new WeakMap()')).toString()).toBe('WeakMap');
   expect((await page.evaluateHandle('new WeakSet()')).toString()).toBe('WeakSet');
   expect((await page.evaluateHandle('new Error()')).toString()).toContain('Error');
-  expect((await page.evaluateHandle('new Proxy({}, {})')).toString()).toBe('Proxy');
+  expect((await page.evaluateHandle('new Proxy({}, {})')).toString()).toBe((browserName === 'chromium') ? 'Proxy(Object)' : 'Proxy');
 });
 
 it('should work with previewable subtypes', async ({ page, browserName }) => {

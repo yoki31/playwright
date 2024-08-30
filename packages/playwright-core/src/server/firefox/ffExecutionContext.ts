@@ -16,11 +16,11 @@
  */
 
 import * as js from '../javascript';
-import { FFSession } from './ffConnection';
-import { Protocol } from './protocol';
+import type { FFSession } from './ffConnection';
+import type { Protocol } from './protocol';
 import { rewriteErrorMessage } from '../../utils/stackTrace';
-import { parseEvaluationResultValue } from '../common/utilityScriptSerializers';
-import { isSessionClosedError } from '../common/protocolError';
+import { parseEvaluationResultValue } from '../isomorphic/utilityScriptSerializers';
+import { isSessionClosedError } from '../protocolError';
 
 export class FFExecutionContext implements js.ExecutionContextDelegate {
   _session: FFSession;
@@ -97,6 +97,10 @@ export class FFExecutionContext implements js.ExecutionContextDelegate {
       executionContextId: this._executionContextId,
       objectId
     });
+  }
+
+  objectCount(objectId: js.ObjectId): Promise<number> {
+    throw new Error('Method not implemented in Firefox.');
   }
 }
 

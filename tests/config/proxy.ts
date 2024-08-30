@@ -14,9 +14,10 @@
  * limitations under the License.
  */
 
-import { IncomingMessage, Server } from 'http';
-import { Socket } from 'net';
-import createProxy from 'proxy';
+import type { IncomingMessage } from 'http';
+import type { Socket } from 'net';
+import type { ProxyServer } from '../third_party/proxy';
+import { createProxy } from '../third_party/proxy';
 
 export class TestProxy {
   readonly PORT: number;
@@ -25,7 +26,7 @@ export class TestProxy {
   connectHosts: string[] = [];
   requestUrls: string[] = [];
 
-  private readonly _server: Server;
+  private readonly _server: ProxyServer;
   private readonly _sockets = new Set<Socket>();
   private _handlers: { event: string, handler: (...args: any[]) => void }[] = [];
 
@@ -50,7 +51,7 @@ export class TestProxy {
     await new Promise(x => this._server.close(x));
   }
 
-  forwardTo(port: number, options?: { skipConnectRequests: boolean }) {
+  forwardTo(port: number, options?: { allowConnectRequests: boolean }) {
     this._prependHandler('request', (req: IncomingMessage) => {
       this.requestUrls.push(req.url);
       const url = new URL(req.url);
@@ -58,12 +59,7 @@ export class TestProxy {
       req.url = url.toString();
     });
     this._prependHandler('connect', (req: IncomingMessage) => {
-      // If using this proxy at the browser-level, you'll want to skip trying to
-      // MITM connect requests otherwise, unless the system/browser is configured
-      // to ignore HTTPS errors (or the host has been configured to trust the test
-      // certs), Playwright will crash in funny ways. (e.g. CR Headful tries to connect
-      // to accounts.google.com as part of its starup routine and fatally complains of "Invalid method encountered".)
-      if (options?.skipConnectRequests)
+      if (!options?.allowConnectRequests)
         return;
       this.connectHosts.push(req.url);
       req.url = `localhost:${port}`;
@@ -71,11 +67,11 @@ export class TestProxy {
   }
 
   setAuthHandler(handler: (req: IncomingMessage) => boolean) {
-    (this._server as any).authenticate = (req: IncomingMessage, callback) => {
+    this._server.authenticate = (req: IncomingMessage) => {
       try {
-        callback(null, handler(req));
+        return handler(req);
       } catch (e) {
-        callback(e, false);
+        return false;
       }
     };
   }
@@ -86,7 +82,7 @@ export class TestProxy {
     for (const { event, handler } of this._handlers)
       this._server.removeListener(event, handler);
     this._handlers = [];
-    (this._server as any).authenticate = undefined;
+    this._server.authenticate = undefined;
   }
 
   private _prependHandler(event: string, handler: (...args: any[]) => void) {

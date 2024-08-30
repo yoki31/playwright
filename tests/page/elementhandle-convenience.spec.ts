@@ -30,6 +30,13 @@ it('should have a nice preview', async ({ page, server }) => {
   expect(String(check)).toBe('JSHandle@<input checked id="check" foo="bar"" type="checkbox"/>');
 });
 
+it('should have a nice preview for non-ascii attributes/children', async ({ page, server }) => {
+  await page.goto(server.EMPTY_PAGE);
+  await page.setContent(`<div title="${'😛'.repeat(100)}">${'😛'.repeat(100)}`);
+  const handle = await page.$('div');
+  await expect.poll(() => String(handle)).toBe(`JSHandle@<div title=\"😛😛😛😛😛😛😛😛😛😛😛😛😛😛😛😛😛😛😛😛😛😛😛😛😛😛😛😛😛😛😛😛😛😛😛😛😛😛😛😛😛😛😛😛😛😛😛😛😛😛😛😛😛😛😛😛😛😛😛😛😛😛😛😛😛😛😛😛😛😛😛😛😛😛😛😛😛😛😛😛😛😛😛😛😛😛😛😛😛😛😛😛😛😛😛😛😛😛😛😛\">😛😛😛😛😛😛😛😛😛😛😛😛😛😛😛😛😛😛😛😛😛😛😛😛😛😛😛😛😛😛😛😛😛😛😛😛😛😛😛😛😛😛😛😛😛😛😛😛😛…</div>`);
+});
+
 it('getAttribute should work', async ({ page, server }) => {
   await page.goto(`${server.PREFIX}/dom.html`);
   const handle = await page.$('#outer');
@@ -56,13 +63,6 @@ it('inputValue should work', async ({ page, server }) => {
   expect(await page.inputValue('#inner').catch(e => e.message)).toContain('Node is not an <input>, <textarea> or <select> element');
   const handle2 = await page.$('#inner');
   expect(await handle2.inputValue().catch(e => e.message)).toContain('Node is not an <input>, <textarea> or <select> element');
-});
-
-it('inputValue should work on label', async ({ page, server }) => {
-  await page.setContent(`<label><input type=text></input></label>`);
-  await page.fill('input', 'foo');
-  const handle = await page.$('label');
-  expect(await handle.inputValue()).toBe('foo');
 });
 
 it('innerHTML should work', async ({ page, server }) => {
@@ -95,92 +95,18 @@ it('textContent should work', async ({ page, server }) => {
   expect(await page.textContent('#inner')).toBe('Text,\nmore text');
 });
 
-it('textContent should be atomic', async ({ playwright, page }) => {
-  const createDummySelector = () => ({
-    query(root, selector) {
-      const result = root.querySelector(selector);
-      if (result)
-        Promise.resolve().then(() => result.textContent = 'modified');
-      return result;
-    },
-    queryAll(root: HTMLElement, selector: string) {
-      const result = Array.from(root.querySelectorAll(selector));
-      for (const e of result)
-        Promise.resolve().then(() => e.textContent = 'modified');
-      return result;
-    }
-  });
-  await playwright.selectors.register('textContent', createDummySelector);
-  await page.setContent(`<div>Hello</div>`);
-  const tc = await page.textContent('textContent=div');
-  expect(tc).toBe('Hello');
-  expect(await page.evaluate(() => document.querySelector('div').textContent)).toBe('modified');
-});
-
-it('innerText should be atomic', async ({ playwright, page }) => {
-  const createDummySelector = () => ({
-    query(root: HTMLElement, selector: string) {
-      const result = root.querySelector(selector);
-      if (result)
-        Promise.resolve().then(() => result.textContent = 'modified');
-      return result;
-    },
-    queryAll(root: HTMLElement, selector: string) {
-      const result = Array.from(root.querySelectorAll(selector));
-      for (const e of result)
-        Promise.resolve().then(() => e.textContent = 'modified');
-      return result;
-    }
-  });
-  await playwright.selectors.register('innerText', createDummySelector);
-  await page.setContent(`<div>Hello</div>`);
-  const tc = await page.innerText('innerText=div');
-  expect(tc).toBe('Hello');
-  expect(await page.evaluate(() => document.querySelector('div').innerText)).toBe('modified');
-});
-
-it('innerHTML should be atomic', async ({ playwright, page }) => {
-  const createDummySelector = () => ({
-    query(root, selector) {
-      const result = root.querySelector(selector);
-      if (result)
-        Promise.resolve().then(() => result.textContent = 'modified');
-      return result;
-    },
-    queryAll(root: HTMLElement, selector: string) {
-      const result = Array.from(root.querySelectorAll(selector));
-      for (const e of result)
-        Promise.resolve().then(() => e.textContent = 'modified');
-      return result;
-    }
-  });
-  await playwright.selectors.register('innerHTML', createDummySelector);
-  await page.setContent(`<div>Hello<span>world</span></div>`);
-  const tc = await page.innerHTML('innerHTML=div');
-  expect(tc).toBe('Hello<span>world</span>');
-  expect(await page.evaluate(() => document.querySelector('div').innerHTML)).toBe('modified');
-});
-
-it('getAttribute should be atomic', async ({ playwright, page }) => {
-  const createDummySelector = () => ({
-    query(root: HTMLElement, selector: string) {
-      const result = root.querySelector(selector);
-      if (result)
-        Promise.resolve().then(() => result.setAttribute('foo', 'modified'));
-      return result;
-    },
-    queryAll(root: HTMLElement, selector: string) {
-      const result = Array.from(root.querySelectorAll(selector));
-      for (const e of result)
-        Promise.resolve().then(() => (e as HTMLElement).setAttribute('foo', 'modified'));
-      return result;
-    }
-  });
-  await playwright.selectors.register('getAttribute', createDummySelector);
-  await page.setContent(`<div foo=hello></div>`);
-  const tc = await page.getAttribute('getAttribute=div', 'foo');
-  expect(tc).toBe('hello');
-  expect(await page.evaluate(() => document.querySelector('div').getAttribute('foo'))).toBe('modified');
+it('textContent should work on ShadowRoot', async ({ page, server }) => {
+  await page.setContent(`
+    <div></div>
+    <script>
+      document.querySelector('div').attachShadow({ mode: 'open' }).innerHTML = '<div>hello</div>';
+    </script>
+  `);
+  const div = await page.$('div');
+  const root = await div.evaluateHandle(div => div.shadowRoot);
+  expect(await root.textContent()).toBe('hello');
+  // We do not match ShadowRoot as ":scope".
+  expect(await root.$$(':scope div')).toEqual([]);
 });
 
 it('isVisible and isHidden should work', async ({ page }) => {
@@ -200,22 +126,6 @@ it('isVisible and isHidden should work', async ({ page }) => {
 
   expect(await page.isVisible('no-such-element')).toBe(false);
   expect(await page.isHidden('no-such-element')).toBe(true);
-});
-
-it('element state checks should work for label with zero-sized input', async ({ page, server }) => {
-  await page.setContent(`
-    <label>
-      Click me
-      <input disabled style="width:0;height:0;padding:0;margin:0;border:0;">
-    </label>
-  `);
-  // Visible checks the label.
-  expect(await page.isVisible('text=Click me')).toBe(true);
-  expect(await page.isHidden('text=Click me')).toBe(false);
-
-  // Enabled checks the input.
-  expect(await page.isEnabled('text=Click me')).toBe(false);
-  expect(await page.isDisabled('text=Click me')).toBe(true);
 });
 
 it('isVisible should not throw when the DOM element is not connected', async ({ page }) => {
@@ -258,6 +168,29 @@ it('isEnabled and isDisabled should work', async ({ page }) => {
   expect(await button2.isDisabled()).toBe(false);
   expect(await page.isEnabled(':text("button2")')).toBe(true);
   expect(await page.isDisabled(':text("button2")')).toBe(false);
+});
+
+it('isEnabled and isDisabled should work with <select/> option/optgroup correctly', async ({ page }) => {
+  await page.setContent(`
+    <select name="select">
+      <option id="enabled1" value="1">Enabled</option>
+      <option id="disabled1" value="2" disabled>Disabled</option>
+      <optgroup label="Foo1">
+        <option value="mercedes">Mercedes</option>
+      </optgroup>
+      <optgroup label="Foo2" disabled>
+        <option value="mercedes">Mercedes</option>
+      </optgroup>
+    </select>
+  `);
+  expect((await (await page.$('#enabled1')).isEnabled())).toBe(true);
+  expect((await (await page.$('#enabled1')).isDisabled())).toBe(false);
+  expect((await (await page.$('#disabled1')).isEnabled())).toBe(false);
+  expect((await (await page.$('#disabled1')).isDisabled())).toBe(true);
+  expect((await (await page.$('optgroup >> nth=0')).isEnabled())).toBe(true);
+  expect((await (await page.$('optgroup >> nth=0')).isDisabled())).toBe(false);
+  expect((await (await page.$('optgroup >> nth=1')).isEnabled())).toBe(false);
+  expect((await (await page.$('optgroup >> nth=1')).isDisabled())).toBe(true);
 });
 
 it('isEditable should work', async ({ page }) => {

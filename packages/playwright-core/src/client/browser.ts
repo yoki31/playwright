@@ -14,33 +14,36 @@
  * limitations under the License.
  */
 
-import * as channels from '../protocol/channels';
+import fs from 'fs';
+import type * as channels from '@protocol/channels';
 import { BrowserContext, prepareBrowserContextParams } from './browserContext';
-import { Page } from './page';
+import type { Page } from './page';
 import { ChannelOwner } from './channelOwner';
 import { Events } from './events';
-import { BrowserContextOptions } from './types';
-import { isSafeCloseError, kBrowserClosedError } from '../utils/errors';
-import * as api from '../../types/types';
+import type { LaunchOptions, BrowserContextOptions, HeadersArray } from './types';
+import { isTargetClosedError } from './errors';
+import type * as api from '../../types/types';
 import { CDPSession } from './cdpSession';
 import type { BrowserType } from './browserType';
-import { LocalUtils } from './localUtils';
+import { Artifact } from './artifact';
+import { mkdirIfNeeded } from '../utils';
 
 export class Browser extends ChannelOwner<channels.BrowserChannel> implements api.Browser {
   readonly _contexts = new Set<BrowserContext>();
   private _isConnected = true;
   private _closedPromise: Promise<void>;
   _shouldCloseConnectionOnClose = false;
-  private _browserType!: BrowserType;
+  _browserType!: BrowserType;
+  _options: LaunchOptions = {};
   readonly _name: string;
-  _localUtils!: LocalUtils;
+  private _path: string | undefined;
+
+  // Used from @playwright/test fixtures.
+  _connectHeaders?: HeadersArray;
+  _closeReason: string | undefined;
 
   static from(browser: channels.BrowserChannel): Browser {
     return (browser as any)._object;
-  }
-
-  static fromNullable(browser: channels.BrowserChannel | null): Browser | null {
-    return browser ? Browser.from(browser) : null;
   }
 
   constructor(parent: ChannelOwner, type: string, guid: string, initializer: channels.BrowserInitializer) {
@@ -50,22 +53,38 @@ export class Browser extends ChannelOwner<channels.BrowserChannel> implements ap
     this._closedPromise = new Promise(f => this.once(Events.Browser.Disconnected, f));
   }
 
-  _setBrowserType(browserType: BrowserType) {
-    this._browserType = browserType;
-    for (const context of this._contexts)
-      context._setBrowserType(browserType);
+  browserType(): BrowserType {
+    return this._browserType;
   }
 
   async newContext(options: BrowserContextOptions = {}): Promise<BrowserContext> {
+    return await this._innerNewContext(options, false);
+  }
+
+  async _newContextForReuse(options: BrowserContextOptions = {}): Promise<BrowserContext> {
+    return await this._wrapApiCall(async () => {
+      for (const context of this._contexts) {
+        await this._browserType._willCloseContext(context);
+        for (const page of context.pages())
+          page._onClose();
+        context._onClose();
+      }
+      return await this._innerNewContext(options, true);
+    }, true);
+  }
+
+  async _stopPendingOperations(reason: string) {
+    return await this._wrapApiCall(async () => {
+      await this._channel.stopPendingOperations({ reason });
+    }, true);
+  }
+
+  async _innerNewContext(options: BrowserContextOptions = {}, forReuse: boolean): Promise<BrowserContext> {
     options = { ...this._browserType._defaultContextOptions, ...options };
     const contextOptions = await prepareBrowserContextParams(options);
-    const context = BrowserContext.from((await this._channel.newContext(contextOptions)).context);
-    context._options = contextOptions;
-    this._contexts.add(context);
-    context._logger = options.logger || this._logger;
-    context._setBrowserType(this._browserType);
-    context._localUtils = this._localUtils;
-    await this._browserType._onDidCreateContext?.(context);
+    const response = forReuse ? await this._channel.newContextForReuse(contextOptions) : await this._channel.newContext(contextOptions);
+    const context = BrowserContext.from(response.context);
+    await this._browserType._didCreateContext(context, contextOptions, this._options, options.logger || this._logger);
     return context;
   }
 
@@ -78,11 +97,13 @@ export class Browser extends ChannelOwner<channels.BrowserChannel> implements ap
   }
 
   async newPage(options: BrowserContextOptions = {}): Promise<Page> {
-    const context = await this.newContext(options);
-    const page = await context.newPage();
-    page._ownedContext = context;
-    context._ownerPage = page;
-    return page;
+    return await this._wrapApiCall(async () => {
+      const context = await this.newContext(options);
+      const page = await context.newPage();
+      page._ownedContext = context;
+      context._ownerPage = page;
+      return page;
+    });
   }
 
   isConnected(): boolean {
@@ -94,22 +115,36 @@ export class Browser extends ChannelOwner<channels.BrowserChannel> implements ap
   }
 
   async startTracing(page?: Page, options: { path?: string; screenshots?: boolean; categories?: string[]; } = {}) {
+    this._path = options.path;
     await this._channel.startTracing({ ...options, page: page ? page._channel : undefined });
   }
 
   async stopTracing(): Promise<Buffer> {
-    return Buffer.from((await this._channel.stopTracing()).binary, 'base64');
+    const artifact = Artifact.from((await this._channel.stopTracing()).artifact);
+    const buffer = await artifact.readIntoBuffer();
+    await artifact.delete();
+    if (this._path) {
+      await mkdirIfNeeded(this._path);
+      await fs.promises.writeFile(this._path, buffer);
+      this._path = undefined;
+    }
+    return buffer;
   }
 
-  async close(): Promise<void> {
+  async [Symbol.asyncDispose]() {
+    await this.close();
+  }
+
+  async close(options: { reason?: string } = {}): Promise<void> {
+    this._closeReason = options.reason;
     try {
       if (this._shouldCloseConnectionOnClose)
-        this._connection.close(kBrowserClosedError);
+        this._connection.close();
       else
-        await this._channel.close();
+        await this._channel.close(options);
       await this._closedPromise;
     } catch (e) {
-      if (isSafeCloseError(e))
+      if (isTargetClosedError(e))
         return;
       throw e;
     }

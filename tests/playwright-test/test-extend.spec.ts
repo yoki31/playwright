@@ -19,6 +19,7 @@ import { test, expect } from './playwright-test-fixtures';
 test('test.extend should work', async ({ runInlineTest }) => {
   const { output, passed } = await runInlineTest({
     'helper.ts': `
+      import { test, expect } from '@playwright/test';
       global.logs = [];
 
       function createDerivedFixtures(suffix) {
@@ -39,7 +40,7 @@ test('test.extend should work', async ({ runInlineTest }) => {
         };
       }
 
-      export const base = pwt.test.extend({
+      export const base = test.extend({
         suffix: ['', { scope: 'worker', option: true } ],
         baseWorker: [async ({ suffix }, run) => {
           global.logs.push('beforeAll-' + suffix);
@@ -128,8 +129,9 @@ test('config should override options but not fixtures', async ({ runInlineTest }
         use: { param: 'config' },
       };
     `,
-    'a.test.js': `
-      const test1 = pwt.test.extend({ param: [ 'default', { option: true } ] });
+    'a.test.ts': `
+      import { test as base, expect } from '@playwright/test';
+      const test1 = base.extend({ param: [ 'default', { option: true } ] });
       test1('default', async ({ param }) => {
         console.log('default-' + param);
       });
@@ -158,15 +160,16 @@ test('config should override options but not fixtures', async ({ runInlineTest }
   expect(result.output).toContain('fixture-config-fixture');
 });
 
-test('test.extend should be able to merge', async ({ runInlineTest }) => {
+test('mergeTests should be able to merge', async ({ runInlineTest }) => {
   const result = await runInlineTest({
     'playwright.config.ts': `
       module.exports = {
         use: { param: 'from-config' },
       };
     `,
-    'a.test.js': `
-      const base = pwt.test.extend({
+    'a.test.ts': `
+      import { test, expect, mergeTests } from '@playwright/test';
+      const base = test.extend({
         myFixture: 'abc',
       });
 
@@ -181,7 +184,7 @@ test('test.extend should be able to merge', async ({ runInlineTest }) => {
         fixture2: ({}, use) => use('fixture2'),
       });
 
-      const test3 = test1._extendTest(test2);
+      const test3 = mergeTests(test1, test2);
 
       test3('merged', async ({ param, fixture1, myFixture, fixture2 }) => {
         console.log('param-' + param);
@@ -199,11 +202,12 @@ test('test.extend should be able to merge', async ({ runInlineTest }) => {
   expect(result.output).toContain('fixture2-fixture2');
 });
 
-test('test.extend should print nice message when used as _extendTest', async ({ runInlineTest }) => {
+test('test.extend should print nice message when used as mergeTests', async ({ runInlineTest }) => {
   const result = await runInlineTest({
-    'a.test.js': `
-      const test1 = pwt.test.extend({});
-      const test2 = pwt.test.extend({});
+    'a.test.ts': `
+      import { test as base, expect } from '@playwright/test';
+      const test1 = base.extend({});
+      const test2 = base.extend({});
       const test3 = test1.extend(test2);
 
       test3('test', () => {});
@@ -211,17 +215,99 @@ test('test.extend should print nice message when used as _extendTest', async ({ 
   });
   expect(result.exitCode).toBe(1);
   expect(result.passed).toBe(0);
-  expect(result.output).toContain('Did you mean to call test._extendTest()?');
+  expect(result.output).toContain('Did you mean to call mergeTests()?');
 });
 
-test('test._extendTest should print nice message when used as extend', async ({ runInlineTest }) => {
+test('mergeTests should print nice message when used as extend', async ({ runInlineTest }) => {
   const result = await runInlineTest({
-    'a.test.js': `
-      const test3 = pwt.test._extendTest({});
+    'a.test.ts': `
+      import { test as base, expect, mergeTests } from '@playwright/test';
+      const test3 = mergeTests(base, {});
       test3('test', () => {});
     `,
   });
   expect(result.exitCode).toBe(1);
   expect(result.passed).toBe(0);
   expect(result.output).toContain('Did you mean to call test.extend() with fixtures instead?');
+});
+
+test('test.use() with undefined should not be ignored', async ({ runInlineTest }) => {
+  const result = await runInlineTest({
+    'playwright.config.ts': `
+      module.exports = {
+        use: { option1: 'config' },
+      };
+    `,
+    'a.test.ts': `
+      import { test as base, expect } from '@playwright/test';
+      const test = base.extend({
+        option1: [ 'default', { option: true } ],
+        option2: [ 'default', { option: true } ],
+      });
+      test('test1', async ({ option1, option2 }) => {
+        console.log('test1: option1=' + option1);
+        console.log('test1: option2=' + option2);
+      });
+
+      test.describe('', () => {
+        test.use({ option1: 'foo', option2: 'foo' });
+        test('test2', async ({ option1, option2 }) => {
+          console.log('test2: option1=' + option1);
+          console.log('test2: option2=' + option2);
+        });
+
+        test.describe('', () => {
+          test.use({ option1: undefined, option2: undefined });
+          test('test3', async ({ option1, option2 }) => {
+            console.log('test3: option1=' + option1);
+            console.log('test3: option2=' + option2);
+          });
+        });
+      });
+
+      test.extend({ option1: undefined, option2: undefined })('test4', async ({ option1, option2 }) => {
+        console.log('test4: option1=' + option1);
+        console.log('test4: option2=' + option2);
+      });
+    `,
+  });
+  expect(result.exitCode).toBe(0);
+  expect(result.passed).toBe(4);
+  expect(result.output).toContain('test1: option1=config');
+  expect(result.output).toContain('test1: option2=default');
+  expect(result.output).toContain('test2: option1=foo');
+  expect(result.output).toContain('test2: option2=foo');
+  expect(result.output).toContain('test3: option1=config');
+  expect(result.output).toContain('test3: option2=default');
+  expect(result.output).toContain('test4: option1=config');
+  expect(result.output).toContain('test4: option2=default');
+});
+
+test('undefined values in config and test.use should be reverted to default', async ({ runInlineTest }) => {
+  const result = await runInlineTest({
+    'playwright.config.ts': `
+      module.exports = {
+        use: { option1: undefined, option2: undefined },
+      };
+    `,
+    'a.test.ts': `
+      import { test as base, expect } from '@playwright/test';
+      const test = base.extend({
+        option1: [ 'default1', { option: true } ],
+        option2: [ 'default2', { option: true } ],
+        option3: [ 'default3', { option: true } ],
+      });
+      test.use({ option2: undefined, option3: undefined });
+      test('my test', async ({ option1, option2, option3 }) => {
+        console.log('option1=' + option1);
+        console.log('option2=' + option2);
+        console.log('option3=' + option3);
+      });
+    `,
+  });
+  expect(result.exitCode).toBe(0);
+  expect(result.passed).toBe(1);
+  expect(result.output).toContain('option1=default1');
+  expect(result.output).toContain('option2=default2');
+  expect(result.output).toContain('option3=default3');
 });

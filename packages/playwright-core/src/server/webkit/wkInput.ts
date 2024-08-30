@@ -16,10 +16,10 @@
  */
 
 import * as input from '../input';
-import * as types from '../types';
+import type * as types from '../types';
 import { macEditingCommands } from '../macEditingCommands';
-import { WKSession } from './wkConnection';
-import { isString } from '../../utils/utils';
+import type { WKSession } from './wkConnection';
+import { isString } from '../../utils';
 import type { Page } from '../page';
 
 function toModifiersMask(modifiers: Set<types.KeyboardModifier>): number {
@@ -153,7 +153,7 @@ export class RawMouseImpl implements input.RawMouse {
       throw new Error('Mouse wheel is not supported in mobile WebKit');
     await this._session!.send('Page.updateScrollingState');
     // Wheel events hit the compositor first, so wait one frame for it to be synced.
-    await this._page!.mainFrame().evaluateExpression(`new Promise(requestAnimationFrame)`, false, false, 'utility');
+    await this._page!.mainFrame().evaluateExpression(`new Promise(requestAnimationFrame)`, { world: 'utility' });
     await this._pageProxySession.send('Input.dispatchWheelEvent', {
       x,
       y,

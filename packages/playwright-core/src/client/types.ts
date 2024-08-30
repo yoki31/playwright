@@ -15,9 +15,9 @@
  * limitations under the License.
  */
 
-import * as channels from '../protocol/channels';
+import type * as channels from '@protocol/channels';
 import type { Size } from '../common/types';
-export { Size, Point, Rect, Quad, URLMatch, TimeoutOptions, HeadersArray } from '../common/types';
+export type { Size, Point, Rect, Quad, TimeoutOptions, HeadersArray } from '../common/types';
 
 type LoggerSeverity = 'verbose' | 'info' | 'warning' | 'error';
 export interface Logger {
@@ -32,8 +32,8 @@ export type Env = { [key: string]: string | number | boolean | undefined };
 export type WaitForEventOptions = Function | { predicate?: Function, timeout?: number };
 export type WaitForFunctionOptions = { timeout?: number, polling?: 'raf' | number };
 
-export type SelectOption = { value?: string, label?: string, index?: number };
-export type SelectOptionOptions = { force?: boolean, timeout?: number, noWaitAfter?: boolean };
+export type SelectOption = { value?: string, label?: string, index?: number, valueOrLabel?: string };
+export type SelectOptionOptions = { force?: boolean, timeout?: number };
 export type FilePayload = { name: string, mimeType: string, buffer: Buffer };
 export type StorageState = {
   cookies: channels.NetworkCookie[],
@@ -47,30 +47,58 @@ export type SetStorageState = {
 export type LifecycleEvent = channels.LifecycleEvent;
 export const kLifecycleEvents: Set<LifecycleEvent> = new Set(['load', 'domcontentloaded', 'networkidle', 'commit']);
 
-export type BrowserContextOptions = Omit<channels.BrowserNewContextOptions, 'viewport' | 'noDefaultViewport' | 'extraHTTPHeaders' | 'storageState'> & {
-  viewport?: Size | null,
-  extraHTTPHeaders?: Headers,
-  logger?: Logger,
-  videosPath?: string,
-  videoSize?: Size,
-  storageState?: string | SetStorageState,
+export type ClientCertificate = {
+  origin: string;
+  cert?: Buffer;
+  certPath?: string;
+  key?: Buffer;
+  keyPath?: string;
+  pfx?: Buffer;
+  pfxPath?: string;
+  passphrase?: string;
+};
+
+export type BrowserContextOptions = Omit<channels.BrowserNewContextOptions, 'viewport' | 'noDefaultViewport' | 'extraHTTPHeaders' | 'clientCertificates' | 'storageState' | 'recordHar' | 'colorScheme' | 'reducedMotion' | 'forcedColors' | 'acceptDownloads'> & {
+  viewport?: Size | null;
+  extraHTTPHeaders?: Headers;
+  logger?: Logger;
+  videosPath?: string;
+  videoSize?: Size;
+  storageState?: string | SetStorageState;
+  har?: {
+    path: string;
+    fallback?: 'abort'|'continue';
+    urlFilter?: string|RegExp;
+  };
+  recordHar?: {
+    path: string,
+    omitContent?: boolean,
+    content?: 'omit' | 'embed' | 'attach',
+    mode?: 'full' | 'minimal',
+    urlFilter?: string | RegExp,
+  };
+  colorScheme?: 'dark' | 'light' | 'no-preference' | null;
+  reducedMotion?: 'reduce' | 'no-preference' | null;
+  forcedColors?: 'active' | 'none' | null;
+  acceptDownloads?: boolean;
+  clientCertificates?: ClientCertificate[];
 };
 
 type LaunchOverrides = {
-  ignoreDefaultArgs?: boolean | string[],
-  env?: Env,
-  logger?: Logger,
+  ignoreDefaultArgs?: boolean | string[];
+  env?: Env;
+  logger?: Logger;
+  firefoxUserPrefs?: { [key: string]: string | number | boolean };
 };
-type FirefoxUserPrefs = {
-  firefoxUserPrefs?: { [key: string]: string | number | boolean },
-};
-type LaunchOptionsBase = Omit<channels.BrowserTypeLaunchOptions, 'ignoreAllDefaultArgs' | 'ignoreDefaultArgs' | 'env' | 'firefoxUserPrefs'> & LaunchOverrides;
-export type LaunchOptions = LaunchOptionsBase & FirefoxUserPrefs;
-export type LaunchPersistentContextOptions = Omit<LaunchOptionsBase & BrowserContextOptions, 'storageState'>;
+
+export type LaunchOptions = Omit<channels.BrowserTypeLaunchOptions, 'ignoreAllDefaultArgs' | 'ignoreDefaultArgs' | 'env' | 'firefoxUserPrefs'> & LaunchOverrides;
+export type LaunchPersistentContextOptions = Omit<LaunchOptions & BrowserContextOptions, 'storageState'>;
 
 export type ConnectOptions = {
   wsEndpoint: string,
   headers?: { [key: string]: string; };
+  exposeNetwork?: string,
+  _exposeNetwork?: string,
   slowMo?: number,
   timeout?: number,
   logger?: Logger,
@@ -95,10 +123,22 @@ export type LaunchServerOptions = {
   },
   downloadsPath?: string,
   chromiumSandbox?: boolean,
+  host?: string,
   port?: number,
   wsPath?: string,
   logger?: Logger,
-} & FirefoxUserPrefs;
+  firefoxUserPrefs?: { [key: string]: string | number | boolean };
+};
+
+export type LaunchAndroidServerOptions = {
+  deviceSerialNumber?: string,
+  adbHost?: string,
+  adbPort?: number,
+  omitDriverInstall?: boolean,
+  host?: string,
+  port?: number,
+  wsPath?: string,
+};
 
 export type SelectorEngine = {
   /**

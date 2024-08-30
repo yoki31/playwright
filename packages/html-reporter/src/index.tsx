@@ -14,15 +14,23 @@
  * limitations under the License.
  */
 
-import type { HTMLReport } from '@playwright/test/src/reporters/html';
+import type { HTMLReport } from './types';
 import type zip from '@zip.js/zip.js';
+// @ts-ignore
+import * as zipImport from '@zip.js/zip.js/lib/zip-no-worker-inflate.js';
 import * as React from 'react';
-import * as ReactDOM from 'react-dom';
+import * as ReactDOM from 'react-dom/client';
 import './colors.css';
-import { LoadedReport } from './loadedReport';
+import type { LoadedReport } from './loadedReport';
 import { ReportView } from './reportView';
+// @ts-ignore
+const zipjs = zipImport as typeof zip;
 
-const zipjs = (self as any).zip;
+import logo from '@web/assets/playwright-logo.svg';
+const link = document.createElement('link');
+link.rel = 'shortcut icon';
+link.href = logo;
+document.head.appendChild(link);
 
 const ReportLoader: React.FC = () => {
   const [report, setReport] = React.useState<LoadedReport | undefined>();
@@ -36,7 +44,7 @@ const ReportLoader: React.FC = () => {
 };
 
 window.onload = () => {
-  ReactDOM.render(<ReportLoader />, document.querySelector('#root'));
+  ReactDOM.createRoot(document.querySelector('#root')!).render(<ReportLoader />);
 };
 
 class ZipReport implements LoadedReport {
@@ -44,7 +52,7 @@ class ZipReport implements LoadedReport {
   private _json!: HTMLReport;
 
   async load() {
-    const zipReader = new zipjs.ZipReader(new zipjs.Data64URIReader(window.playwrightReportBase64), { useWebWorkers: false }) as zip.ZipReader;
+    const zipReader = new zipjs.ZipReader(new zipjs.Data64URIReader(window.playwrightReportBase64!), { useWebWorkers: false });
     for (const entry of await zipReader.getEntries())
       this._entries.set(entry.filename, entry);
     this._json = await this.entry('report.json') as HTMLReport;

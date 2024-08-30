@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 set -e
 set -x
 
@@ -91,10 +91,10 @@ else
 fi
 
 echo "==================== Publishing version ${VERSION} ================"
-node ./utils/prepare_packages.js
-node -e "console.log(require('./utils/list_packages').packagesToPublish.join('\\n'))" | while read package
+node ./utils/workspace.js --ensure-consistent
+node ./utils/workspace.js --list-public-package-paths | while read package
 do
-  npm publish ${package} --tag="${NPM_PUBLISH_TAG}"
+  npm publish --access=public ${package} --tag="${NPM_PUBLISH_TAG}" --provenance
 done
 
 echo "Done."

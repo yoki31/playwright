@@ -16,37 +16,47 @@
 
 import { baseTest } from '../config/baseTest';
 import * as path from 'path';
-import { ElectronApplication, Page } from 'playwright-core';
-import { PageTestFixtures, PageWorkerFixtures } from '../page/pageTestApi';
+import type { ElectronApplication, Page, Electron } from '@playwright/test';
+import type { PageTestFixtures, PageWorkerFixtures } from '../page/pageTestApi';
+import type { TraceViewerFixtures } from '../config/traceViewerFixtures';
+import { traceViewerFixtures } from '../config/traceViewerFixtures';
 export { expect } from '@playwright/test';
 
 type ElectronTestFixtures = PageTestFixtures & {
   electronApp: ElectronApplication;
+  launchElectronApp: (appFile: string, args?: string[], options?: Parameters<Electron['launch']>[0]) => Promise<ElectronApplication>;
   newWindow: () => Promise<Page>;
 };
 
-const electronVersion = require('electron/package.json').version;
-
-export const electronTest = baseTest.extend<ElectronTestFixtures, PageWorkerFixtures>({
-  browserVersion: [electronVersion, { scope: 'worker' }],
-  browserMajorVersion: [Number(electronVersion.split('.')[0]), { scope: 'worker' }],
+export const electronTest = baseTest.extend<TraceViewerFixtures>(traceViewerFixtures).extend<ElectronTestFixtures, PageWorkerFixtures>({
+  browserVersion: [({}, use) => use(process.env.ELECTRON_CHROMIUM_VERSION), { scope: 'worker' }],
+  browserMajorVersion: [({}, use) =>  use(Number(process.env.ELECTRON_CHROMIUM_VERSION.split('.')[0])), { scope: 'worker' }],
+  electronMajorVersion: [({}, use) => use(parseInt(require('electron/package.json').version.split('.')[0], 10)), { scope: 'worker' }],
   isAndroid: [false, { scope: 'worker' }],
   isElectron: [true, { scope: 'worker' }],
+  isWebView2: [false, { scope: 'worker' }],
 
-  electronApp: async ({ playwright }, run) => {
+  launchElectronApp: async ({ playwright }, use) => {
     // This env prevents 'Electron Security Policy' console message.
     process.env['ELECTRON_DISABLE_SECURITY_WARNINGS'] = 'true';
-    const electronApp = await playwright._electron.launch({
-      args: [path.join(__dirname, 'electron-app.js')],
+    const apps: ElectronApplication[] = [];
+    await use(async (appFile: string, args: string[] = [], options?: Parameters<Electron['launch']>[0]) => {
+      const app = await playwright._electron.launch({ ...options, args: [path.join(__dirname, appFile), ...args] });
+      apps.push(app);
+      return app;
     });
-    await run(electronApp);
-    await electronApp.close();
+    for (const app of apps)
+      await app.close();
+  },
+
+  electronApp: async ({ launchElectronApp }, use) => {
+    await use(await launchElectronApp('electron-app.js'));
   },
 
   newWindow: async ({ electronApp }, run) => {
     const windows: Page[] = [];
     await run(async () => {
-      const [ window ] = await Promise.all([
+      const [window] = await Promise.all([
         electronApp.waitForEvent('window'),
         electronApp.evaluate(async electron => {
           // Avoid "Error: Cannot create BrowserWindow before app is ready".
@@ -58,7 +68,7 @@ export const electronTest = baseTest.extend<ElectronTestFixtures, PageWorkerFixt
             // and can script them. We use that heavily in our tests.
             webPreferences: { sandbox: true }
           });
-          window.loadURL('about:blank');
+          await window.loadURL('about:blank');
         })
       ]);
       windows.push(window);
@@ -70,5 +80,9 @@ export const electronTest = baseTest.extend<ElectronTestFixtures, PageWorkerFixt
 
   page: async ({ newWindow }, run) => {
     await run(await newWindow());
+  },
+
+  context: async ({ electronApp }, run) => {
+    await run(electronApp.context());
   },
 });

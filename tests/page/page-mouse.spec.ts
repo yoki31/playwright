@@ -15,7 +15,7 @@
  * limitations under the License.
  */
 
-import { test as it, expect } from './pageTest';
+import { test as it, expect, rafraf } from './pageTest';
 
 function dimensions() {
   const rect = document.querySelector('textarea').getBoundingClientRect();
@@ -27,7 +27,7 @@ function dimensions() {
   };
 }
 
-it('should click the document #smoke', async ({ page, server }) => {
+it('should click the document @smoke', async ({ page, server }) => {
   await page.evaluate(() => {
     window['clickPromise'] = new Promise(resolve => {
       document.addEventListener('click', event => {
@@ -110,18 +110,52 @@ it('should pointerdown the div with a custom button', async ({ page, server, bro
   expect(event.pointerId).toBe(browserName === 'firefox' ? 0 : 1);
 });
 
+it('should report correct buttons property', async ({ page }) => {
+  await page.evaluate(() => {
+    (window as any).__EVENTS = [];
+    const handler = event => {
+      (window as any).__EVENTS.push({
+        type: event.type,
+        button: event.button,
+        buttons: event.buttons,
+      });
+    };
+    window.addEventListener('mousedown', handler, false);
+    window.addEventListener('mouseup', handler, false);
+  });
+  await page.mouse.move(50, 60);
+  await page.mouse.down({
+    button: 'middle',
+  });
+  await page.mouse.down({
+    button: 'left',
+  });
+  await page.mouse.up({
+    button: 'middle',
+  });
+  await page.mouse.up({
+    button: 'left',
+  });
+  expect(await page.evaluate(() => (window as any).__EVENTS)).toEqual([
+    { type: 'mousedown', button: 1, buttons: 4 },
+    { type: 'mousedown', button: 0, buttons: 5 },
+    { type: 'mouseup', button: 1, buttons: 1 },
+    { type: 'mouseup', button: 0, buttons: 0 },
+  ]);
+});
+
 it('should select the text with mouse', async ({ page, server }) => {
   await page.goto(server.PREFIX + '/input/textarea.html');
   await page.focus('textarea');
   const text = 'This is the text that we are going to try to select. Let\'s see how it goes.';
   await page.keyboard.type(text);
   // Firefox needs an extra frame here after typing or it will fail to set the scrollTop
-  await page.evaluate(() => new Promise(requestAnimationFrame));
+  await rafraf(page);
   await page.evaluate(() => document.querySelector('textarea').scrollTop = 0);
   const { x, y } = await page.evaluate(dimensions);
-  await page.mouse.move(x + 2,y + 2);
+  await page.mouse.move(x + 2, y + 2);
   await page.mouse.down();
-  await page.mouse.move(200,200);
+  await page.mouse.move(200, 200);
   await page.mouse.up();
   expect(await page.evaluate(() => {
     const textarea = document.querySelector('textarea');
@@ -197,7 +231,7 @@ it('should tween mouse movement', async ({ page, browserName, isAndroid }) => {
   ]);
 });
 
-it('should always round down', async ({ page, browserName, isAndroid }) => {
+it('should always round down', async ({ page }) => {
   await page.evaluate(() => {
     document.addEventListener('mousedown', event => {
       window['result'] = [event.clientX, event.clientY];
@@ -206,3 +240,41 @@ it('should always round down', async ({ page, browserName, isAndroid }) => {
   await page.mouse.click(50.1, 50.9);
   expect(await page.evaluate('result')).toEqual([50, 50]);
 });
+
+it('should not crash on mouse drag with any button', async ({ page }) => {
+  it.info().annotations.push({ type: 'issue', description: 'https://github.com/microsoft/playwright/issues/16609' });
+  await page.evaluate(() => {
+    // Do not show contextmenu on right click since it is poorly supported.
+    window.addEventListener('contextmenu', e => e.preventDefault(), false);
+  });
+  for (const button of ['left', 'middle', 'right'] as const) {
+    await page.mouse.move(50, 50);
+    await page.mouse.down({ button });
+    await page.mouse.move(100, 100);
+  }
+});
+
+it('should dispatch mouse move after context menu was opened', async ({ page, browserName, isWindows }) => {
+  it.info().annotations.push({ type: 'issue', description: 'https://github.com/microsoft/playwright/issues/20823' });
+  it.fixme(browserName === 'firefox');
+  it.skip(browserName === 'chromium' && isWindows, 'context menu support is best-effort for Linux and MacOS');
+  await page.evaluate(() => {
+    window['contextMenuPromise'] = new Promise(x => {
+      window.addEventListener('contextmenu', x, false);
+    });
+  });
+  const CX = 100, CY = 100;
+  await page.mouse.move(CX, CY);
+  await page.mouse.down({ button: 'right' });
+  await page.evaluate(() => window['contextMenuPromise']);
+  const N = 20;
+  for (const radius of [10, 30, 60, 90]) {
+    for (let i = 0; i < N; ++i) {
+      const angle = 2 * Math.PI * i / N;
+      const x = CX + Math.round(radius * Math.cos(angle));
+      const y = CY + Math.round(radius * Math.sin(angle));
+      await page.mouse.move(x, y);
+    }
+  }
+});
+

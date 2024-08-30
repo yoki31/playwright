@@ -15,7 +15,17 @@
 
 ## How to Contribute
 
+We strongly recommend that you open an issue before beginning any code modifications. This is particularly important if the changes involve complex logic or if the existing code isn't immediately clear. By doing so, we can discuss and agree upon the best approach to address a bug or implement a feature, ensuring that our efforts are aligned.
+
 ### Getting Code
+
+Make sure you're running Node.js 20 to verify and upgrade NPM do:
+
+```bash
+node --version
+npm --version
+npm i -g npm@latest
+```
 
 1. Clone this repository
 
@@ -27,7 +37,7 @@ cd playwright
 2. Install dependencies
 
 ```bash
-npm install
+npm ci
 ```
 
 3. Build Playwright
@@ -36,11 +46,15 @@ npm install
 npm run build
 ```
 
-4. Run all Playwright tests locally. For more information about tests, read [Running & Writing Tests](#running--writing-tests).
+4. Run tests
+
+This will run a test on line `23` in `page-fill.spec.ts`:
 
 ```bash
-npm test
+npm run ctest -- page-fill:23
 ```
+
+See [here](#running--writing-tests) for more information about running and writing tests.
 
 ### Code reviews
 
@@ -85,7 +99,7 @@ footer
 1. *label* is one of the following:
     - `fix` - playwright bug fixes.
     - `feat` - playwright features.
-    - `docs` - changes to docs, e.g. `docs(api.md): ..` to change documentation.
+    - `docs` - changes to docs, e.g. `docs(api): ..` to change documentation.
     - `test` - changes to playwright tests infrastructure.
     - `devops` - build-related work, e.g. CI related patches and general changes to the browser build infrastructure
     - `chore` - everything that doesn't fall under previous categories
@@ -114,6 +128,12 @@ To run the documentation linter, use:
 npm run doc
 ```
 
+To build the documentation site locally and test how your changes will look in practice:
+
+1. Clone the [microsoft/playwright.dev](https://github.com/microsoft/playwright.dev) repo
+1. Follow [the playwright.dev README instructions to "roll docs"](https://github.com/microsoft/playwright.dev/#roll-docs) against your local `playwright` repo with your changes in progress
+1. Follow [the playwright.dev README instructions to "run dev server"](https://github.com/microsoft/playwright.dev/#run-dev-server) to view your changes
+
 ### Adding New Dependencies
 
 For all dependencies (both installation and development):
@@ -136,15 +156,28 @@ These are integration tests, making sure public API methods and events work as e
 - To run all tests:
 
 ```bash
+npx playwright install
 npm run test
 ```
 
-- To run all tests in Chromium
+Be sure to run `npm run build` or let `npm run watch` run before you re-run the
+tests after making your changes to check them.
+
+- To run tests in Chromium
 ```bash
 npm run ctest # also `ftest` for firefox and `wtest` for WebKit
+npm run ctest -- page-fill:23 # runs line 23 of page-fill.spec.ts
 ```
 
-- To run a specific test, substitute `it` with `it.only`:
+To run tests in WebKit / Firefox, use `wtest` or `ftest`.
+
+- To run the Playwright test runner tests
+```bash
+npm run ttest
+npm run ttest -- --grep "specific test"
+```
+
+- To run a specific test, substitute `it` with `it.only`, or use the `--grep 'My test'` CLI parameter:
 
 ```js
 ...
@@ -153,6 +186,8 @@ it.only('should work', async ({server, page}) => {
   const response = await page.goto(server.EMPTY_PAGE);
   expect(response.ok).toBe(true);
 });
+// or
+playwright test --config=xxx --grep 'should work'
 ```
 
 - To disable a specific test, substitute `it` with `it.skip`:
@@ -169,7 +204,7 @@ it.skip('should work', async ({server, page}) => {
 - To run tests in non-headless (headed) mode:
 
 ```bash
-HEADFUL=1 npm run ctest
+npm run ctest -- --headed
 ```
 
 - To run tests with custom browser executable, specify `CRPATH`, `WKPATH` or `FFPATH` env variable that points to browser executable:
@@ -178,31 +213,13 @@ HEADFUL=1 npm run ctest
 CRPATH=<path-to-executable> npm run ctest
 ```
 
-- To run tests in slow-mode:
-
-```bash
-HEADFUL=1 SLOW_MO=500 npm run wtest
-```
-
-- When should a test be marked with `skip` or `fail`?
+- When should a test be marked with `skip` or `fixme`?
 
   - **`skip(condition)`**: This test *should ***never*** work* for `condition`
-    where `condition` is usually a certain browser like `FFOX` (for Firefox),
-    `WEBKIT` (for WebKit), and `CHROMIUM` (for Chromium).
+    where `condition` is usually something like: `test.skip(browserName === 'chromium', 'This does not work because of ...')`.
 
-    For example, the [alt-click downloads test](https://github.com/microsoft/playwright/blob/471ccc72d3f0847caa36f629b394a028c7750d93/test/download.spec.js#L86) is marked
-    with `skip(FFOX)` since an alt-click in Firefox will not produce a download
-    even if a person was driving the browser.
-
-
-  - **`fail(condition)`**: This test *should ***eventually*** work* for `condition`
-    where `condition` is usually a certain browser like `FFOX` (for Firefox),
-    `WEBKIT` (for WebKit), and `CHROMIUM` (for Chromium).
-
-    For example, the [alt-click downloads test](https://github.com/microsoft/playwright/blob/471ccc72d3f0847caa36f629b394a028c7750d93/test/download.spec.js#L86) is marked
-    with `fail(CHROMIUM || WEBKIT)` since Playwright performing these actions
-    currently diverges from what a user would experience driving a Chromium or
-    WebKit.
+  - **`fixme(condition)`**: This test *should ***eventually*** work* for `condition`
+    where `condition` is usually something like: `test.fixme(browserName === 'chromium', 'We are waiting for version x')`.
 
 ## Contributor License Agreement
 

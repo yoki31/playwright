@@ -14,11 +14,14 @@
   limitations under the License.
 */
 
-import type { TestAttachment } from '@playwright/test/src/reporters/html';
+import type { TestAttachment } from './types';
 import * as React from 'react';
 import * as icons from './icons';
 import { TreeItem } from './treeItem';
+import { CopyToClipboard } from './copyToClipboard';
 import './links.css';
+import { linkifyText } from '@web/renderUtils';
+import { clsx } from '@web/uiUtils';
 
 export function navigate(href: string) {
   window.history.pushState({}, '', href);
@@ -27,29 +30,32 @@ export function navigate(href: string) {
 }
 
 export const Route: React.FunctionComponent<{
-  params: string,
+  predicate: (params: URLSearchParams) => boolean,
   children: any
-}> = ({ params, children }) => {
-  const initialParams = [...new URLSearchParams(window.location.hash.slice(1)).keys()].join('&');
-  const [currentParams, setCurrentParam] = React.useState(initialParams);
+}> = ({ predicate, children }) => {
+  const [matches, setMatches] = React.useState(predicate(new URLSearchParams(window.location.hash.slice(1))));
   React.useEffect(() => {
-    const listener = () => {
-      const newParams = [...new URLSearchParams(window.location.hash.slice(1)).keys()].join('&');
-      setCurrentParam(newParams);
-    };
+    const listener = () => setMatches(predicate(new URLSearchParams(window.location.hash.slice(1))));
     window.addEventListener('popstate', listener);
     return () => window.removeEventListener('popstate', listener);
-  }, []);
-  return currentParams === params ? children : null;
+  }, [predicate]);
+  return matches ? children : null;
 };
 
 export const Link: React.FunctionComponent<{
-  href: string,
+  href?: string,
+  click?: string,
+  ctrlClick?: string,
   className?: string,
   title?: string,
   children: any,
-}> = ({ href, className, children, title }) => {
-  return <a style={{ textDecoration: 'none', color: 'var(--color-fg-default)' }} className={`${className || ''}`} href={href} title={title}>{children}</a>;
+}> = ({ click, ctrlClick, children, ...rest }) => {
+  return <a {...rest} style={{ textDecoration: 'none', color: 'var(--color-fg-default)', cursor: 'pointer' }} onClick={e => {
+    if (click) {
+      e.preventDefault();
+      navigate(e.metaKey || e.ctrlKey ? ctrlClick || click : click);
+    }
+  }}>{children}</a>;
 };
 
 export const ProjectLink: React.FunctionComponent<{
@@ -59,7 +65,7 @@ export const ProjectLink: React.FunctionComponent<{
   const encoded = encodeURIComponent(projectName);
   const value = projectName === encoded ? projectName : `"${encoded.replace(/%22/g, '%5C%22')}"`;
   return <Link href={`#?q=p:${value}`}>
-    <span className={'label label-color-' + (projectNames.indexOf(projectName) % 6)}>
+    <span className={clsx('label', `label-color-${projectNames.indexOf(projectName) % 6}`)} style={{ margin: '6px 0 0 6px' }}>
       {projectName}
     </span>
   </Link>;
@@ -68,14 +74,28 @@ export const ProjectLink: React.FunctionComponent<{
 export const AttachmentLink: React.FunctionComponent<{
   attachment: TestAttachment,
   href?: string,
-}> = ({ attachment, href }) => {
+  linkName?: string,
+}> = ({ attachment, href, linkName }) => {
   return <TreeItem title={<span>
     {attachment.contentType === kMissingContentType ? icons.warning() : icons.attachment()}
-    {attachment.path && <a href={href || attachment.path} target='_blank'>{attachment.name}</a>}
-    {attachment.body && <span>{attachment.name}</span>}
+    {attachment.path && <a href={href || attachment.path} download={downloadFileNameForAttachment(attachment)}>{linkName || attachment.name}</a>}
+    {!attachment.path && <span>{linkifyText(attachment.name)}</span>}
   </span>} loadChildren={attachment.body ? () => {
-    return [<div className='attachment-body'>{attachment.body}</div>];
-  } : undefined} depth={0}></TreeItem>;
+    return [<div key={1} className='attachment-body'><CopyToClipboard value={attachment.body!}/>{linkifyText(attachment.body!)}</div>];
+  } : undefined} depth={0} style={{ lineHeight: '32px' }}></TreeItem>;
 };
+
+function downloadFileNameForAttachment(attachment: TestAttachment): string {
+  if (attachment.name.includes('.') || !attachment.path)
+    return attachment.name;
+  const firstDotIndex = attachment.path.indexOf('.');
+  if (firstDotIndex === -1)
+    return attachment.name;
+  return attachment.name + attachment.path.slice(firstDotIndex, attachment.path.length);
+}
+
+export function generateTraceUrl(traces: TestAttachment[]) {
+  return `trace/index.html?${traces.map((a, i) => `trace=${new URL(a.path!, window.location.href)}`).join('&')}`;
+}
 
 const kMissingContentType = 'x-playwright/missing';

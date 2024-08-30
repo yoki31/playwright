@@ -63,6 +63,30 @@ static void* keyValueObservingContext = &keyValueObservingContext;
 
 @end
 
+@implementation CustomWindow
+
+- (NSRect)constrainFrameRect:(NSRect)frameRect toScreen:(NSScreen *)screen
+{
+    float kWindowControlBarHeight = 35;
+
+    CGFloat screenHeight = screen.frame.size.height; // e.g. 1080
+    CGFloat windowHeight = self.frame.size.height; // e.g. 5000
+    CGFloat screenYOffset = screen.frame.origin.y; // screen arrangement offset
+
+    bool exceedsAtTheTop = (NSMaxY(frameRect) - screenYOffset) > screenHeight;
+    bool exceedsAtTheBottom = (frameRect.origin.y + windowHeight + -screenYOffset - kWindowControlBarHeight) < 0;
+    CGFloat newOriginY = frameRect.origin.y;
+    // if it exceeds the height, then we move it to the top of the screen
+    if (screenHeight > 0 && exceedsAtTheTop)
+        newOriginY = screenHeight - windowHeight - kWindowControlBarHeight + screenYOffset;
+    // if it exceeds the bottom, then we move it to the bottom of the screen but make sure that the control bar is still visible
+    else if (screenHeight > 0 && exceedsAtTheBottom)
+        newOriginY = -windowHeight + screenYOffset + kWindowControlBarHeight;
+    return NSMakeRect(frameRect.origin.x, newOriginY, frameRect.size.width, frameRect.size.height);
+}
+
+@end
+
 @interface BrowserWindowController () <NSTextFinderBarContainer, WKNavigationDelegate, WKUIDelegate, _WKIconLoadingDelegate, NSSharingServicePickerDelegate, NSSharingServiceDelegate>
 @end
 
@@ -187,7 +211,7 @@ static void* keyValueObservingContext = &keyValueObservingContext;
         | _WKRenderingProgressEventFirstLayoutAfterSuppressedIncrementalRendering
         | _WKRenderingProgressEventFirstPaintAfterSuppressedIncrementalRendering;
 
-    _webView.customUserAgent = @"Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_2) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/13.0.4 Safari/605.1.15";
+    _webView.customUserAgent = @"Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.4 Safari/605.1.15";
 
     _webView._usePlatformFindUI = NO;
 
@@ -658,6 +682,12 @@ static BOOL areEssentiallyEqual(double a, double b)
     }];
 }
 
+// Always automatically accept requestStorageAccess dialog.
+- (void)_webView:(WKWebView *)webView requestStorageAccessPanelForDomain:(NSString *)requestingDomain underCurrentDomain:(NSString *)currentDomain completionHandler:(void (^)(BOOL result))completionHandler
+{
+    completionHandler(true);
+}
+
 - (WKDragDestinationAction)_webView:(WKWebView *)webView dragDestinationActionMaskForDraggingInfo:(id)draggingInfo
 {
     return WKDragDestinationActionAny;
@@ -694,7 +724,7 @@ static BOOL areEssentiallyEqual(double a, double b)
     [_webView loadHTMLString:HTMLString baseURL:nil];
 }
 
-static NSSet *dataTypes()
+static NSSet *dataTypes(void)
 {
     return [WKWebsiteDataStore allWebsiteDataTypes];
 }
@@ -740,6 +770,15 @@ static NSSet *dataTypes()
         return;
     }
 
+    if (navigationAction.buttonNumber == 1 &&
+        (navigationAction.modifierFlags & (NSEventModifierFlagCommand | NSEventModifierFlagShift)) != 0) {
+        WKWindowFeatures* windowFeatures = [[[WKWindowFeatures alloc] init] autorelease];
+        WKWebView* newView = [self webView:webView createWebViewWithConfiguration:webView.configuration forNavigationAction:navigationAction windowFeatures:windowFeatures];
+        [newView loadRequest:navigationAction.request];
+        decisionHandler(WKNavigationActionPolicyCancel);
+        return;
+    }
+
     if (navigationAction._canHandleRequest) {
         decisionHandler(WKNavigationActionPolicyAllow);
         return;
@@ -753,7 +792,19 @@ static NSSet *dataTypes()
       decisionHandler(WKNavigationResponsePolicyAllow);
       return;
     }
+
     NSHTTPURLResponse *httpResponse = (NSHTTPURLResponse *)navigationResponse.response;
+
+    NSString *contentType = [httpResponse valueForHTTPHeaderField:@"Content-Type"];
+    if (!navigationResponse.canShowMIMEType && (contentType && [contentType length] > 0)) {
+        decisionHandler(WKNavigationResponsePolicyDownload);
+        return;
+    }
+
+    if (contentType && ([contentType isEqualToString:@"application/pdf"] || [contentType isEqualToString:@"text/pdf"])) {
+        decisionHandler(WKNavigationResponsePolicyDownload);
+        return;
+    }
 
     NSString *disposition = [[httpResponse allHeaderFields] objectForKey:@"Content-Disposition"];
     if (disposition && [disposition hasPrefix:@"attachment"]) {

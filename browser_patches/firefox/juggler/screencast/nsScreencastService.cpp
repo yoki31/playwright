@@ -18,13 +18,14 @@
 #include "nsThreadManager.h"
 #include "nsView.h"
 #include "nsViewManager.h"
-#include "webrtc/modules/desktop_capture/desktop_capturer.h"
-#include "webrtc/modules/desktop_capture/desktop_capture_options.h"
-#include "webrtc/modules/desktop_capture/desktop_device_info.h"
-#include "webrtc/modules/desktop_capture/desktop_frame.h"
-#include "webrtc/modules/video_capture/video_capture.h"
+#include "modules/desktop_capture/desktop_capturer.h"
+#include "modules/desktop_capture/desktop_capture_options.h"
+#include "modules/desktop_capture/desktop_frame.h"
+#include "modules/video_capture/video_capture.h"
 #include "mozilla/widget/PlatformWidgetTypes.h"
 #include "video_engine/desktop_capture_impl.h"
+#include "VideoEngine.h"
+
 extern "C" {
 #include "jpeglib.h"
 }
@@ -56,7 +57,7 @@ rtc::scoped_refptr<webrtc::VideoCaptureModuleEx> CreateWindowCapturer(nsIWidget*
   windowId.AppendPrintf("%" PRIuPTR, rawWindowId);
   bool captureCursor = false;
   static int moduleId = 0;
-  return webrtc::DesktopCaptureImpl::Create(++moduleId, windowId.get(), webrtc::CaptureDeviceType::Window, captureCursor);
+  return rtc::scoped_refptr<webrtc::VideoCaptureModuleEx>(webrtc::DesktopCaptureImpl::Create(++moduleId, windowId.get(), camera::CaptureDeviceType::Window, captureCursor));
 }
 
 nsresult generateUid(nsString& uid) {
@@ -79,16 +80,17 @@ nsresult generateUid(nsString& uid) {
 
 class nsScreencastService::Session : public rtc::VideoSinkInterface<webrtc::VideoFrame>,
                                      public webrtc::RawFrameCallback {
- public:
   Session(
     nsIScreencastServiceClient* client,
+    nsIWidget* widget,
     rtc::scoped_refptr<webrtc::VideoCaptureModuleEx>&& capturer,
-    RefPtr<ScreencastEncoder>&& encoder,
+    std::unique_ptr<ScreencastEncoder> encoder,
     int width, int height,
     int viewportWidth, int viewportHeight,
     gfx::IntMargin margin,
     uint32_t jpegQuality)
       : mClient(client)
+      , mWidget(widget)
       , mCaptureModule(std::move(capturer))
       , mEncoder(std::move(encoder))
       , mJpegQuality(jpegQuality)
@@ -97,6 +99,27 @@ class nsScreencastService::Session : public rtc::VideoSinkInterface<webrtc::Vide
       , mViewportWidth(viewportWidth)
       , mViewportHeight(viewportHeight)
       , mMargin(margin) {
+  }
+  ~Session() override = default;
+
+ public:
+  NS_INLINE_DECL_THREADSAFE_REFCOUNTING(Session)
+  static RefPtr<Session> Create(
+    nsIScreencastServiceClient* client,
+    nsIWidget* widget,
+    rtc::scoped_refptr<webrtc::VideoCaptureModuleEx>&& capturer,
+    std::unique_ptr<ScreencastEncoder> encoder,
+    int width, int height,
+    int viewportWidth, int viewportHeight,
+    gfx::IntMargin margin,
+    uint32_t jpegQuality) {
+    return do_AddRef(new Session(client, widget, std::move(capturer), std::move(encoder), width, height, viewportWidth, viewportHeight, margin, jpegQuality));
+  }
+
+  rtc::scoped_refptr<webrtc::VideoCaptureModuleEx> ReuseCapturer(nsIWidget* widget) {
+    if (mWidget == widget)
+      return mCaptureModule;
+    return nullptr;
   }
 
   bool Start() {
@@ -120,32 +143,34 @@ class nsScreencastService::Session : public rtc::VideoSinkInterface<webrtc::Vide
   }
 
   void Stop() {
+    if (mStopped) {
+      fprintf(stderr, "Screencast session has already been stopped\n");
+      return;
+    }
+    mStopped = true;
     if (mEncoder)
       mCaptureModule->DeRegisterCaptureDataCallback(this);
     else
       mCaptureModule->DeRegisterRawFrameCallback(this);
-    int error = mCaptureModule->StopCapture();
-    if (error) {
-      fprintf(stderr, "StopCapture error %d\n", error);
-    }
+    mCaptureModule->StopCapture();
     if (mEncoder) {
-      rtc::CritScope lock(&mCaptureCallbackCs);
-      mEncoder->finish([client = std::move(mClient)] {
+      mEncoder->finish([this, protect = RefPtr{this}] {
         NS_DispatchToMainThread(NS_NewRunnableFunction(
-            "NotifyScreencastStopped", [client = std::move(client)]() -> void {
-              client->ScreencastStopped();
+            "NotifyScreencastStopped", [this, protect = std::move(protect)]() -> void {
+              mClient->ScreencastStopped();
             }));
       });
     } else {
-      rtc::CritScope lock(&mCaptureCallbackCs);
       mClient->ScreencastStopped();
-      mClient = nullptr;
     }
   }
 
   void ScreencastFrameAck() {
-    rtc::CritScope lock(&mCaptureCallbackCs);
-    --mFramesInFlight;
+    if (mFramesInFlight.load() == 0) {
+      fprintf(stderr, "ScreencastFrameAck is called while there are no inflight frames\n");
+      return;
+    }
+    mFramesInFlight.fetch_sub(1);
   }
 
   // These callbacks end up running on the VideoCapture thread.
@@ -168,15 +193,8 @@ class nsScreencastService::Session : public rtc::VideoSinkInterface<webrtc::Vide
     if (mViewportHeight && pageHeight > mViewportHeight)
       pageHeight = mViewportHeight;
 
-    {
-      rtc::CritScope lock(&mCaptureCallbackCs);
-      if (mFramesInFlight >= kMaxFramesInFlight) {
-        return;
-      }
-      ++mFramesInFlight;
-      if (!mClient)
-        return;
-    }
+    if (mFramesInFlight.load() >= kMaxFramesInFlight)
+      return;
 
     int screenshotWidth = pageWidth;
     int screenshotHeight = pageHeight;
@@ -257,21 +275,24 @@ class nsScreencastService::Session : public rtc::VideoSinkInterface<webrtc::Vide
       return;
     }
 
-    nsIScreencastServiceClient* client = mClient.get();
+    mFramesInFlight.fetch_add(1);
     NS_DispatchToMainThread(NS_NewRunnableFunction(
-        "NotifyScreencastFrame", [client, base64, pageWidth, pageHeight]() -> void {
+        "NotifyScreencastFrame", [this, protect = RefPtr{this}, base64, pageWidth, pageHeight]() -> void {
+          if (mStopped)
+            return;
           NS_ConvertUTF8toUTF16 utf16(base64);
-          client->ScreencastFrame(utf16, pageWidth, pageHeight);
+          mClient->ScreencastFrame(utf16, pageWidth, pageHeight);
         }));
   }
 
  private:
   RefPtr<nsIScreencastServiceClient> mClient;
+  nsIWidget* mWidget;
   rtc::scoped_refptr<webrtc::VideoCaptureModuleEx> mCaptureModule;
-  RefPtr<ScreencastEncoder> mEncoder;
+  std::unique_ptr<ScreencastEncoder> mEncoder;
   uint32_t mJpegQuality;
-  rtc::CriticalSection mCaptureCallbackCs;
-  uint32_t mFramesInFlight = 0;
+  bool mStopped = false;
+  std::atomic<uint32_t> mFramesInFlight = 0;
   int mWidth;
   int mHeight;
   int mViewportWidth;
@@ -310,7 +331,14 @@ nsresult nsScreencastService::StartVideoRecording(nsIScreencastServiceClient* aC
     return NS_ERROR_UNEXPECTED;
   nsIWidget* widget = view->GetWidget();
 
-  rtc::scoped_refptr<webrtc::VideoCaptureModuleEx> capturer = CreateWindowCapturer(widget);
+  rtc::scoped_refptr<webrtc::VideoCaptureModuleEx> capturer = nullptr;
+  for (auto& it : mIdToSession) {
+    capturer = it.second->ReuseCapturer(widget);
+    if (capturer)
+      break;
+  }
+  if (!capturer)
+    capturer = CreateWindowCapturer(widget);
   if (!capturer)
     return NS_ERROR_FAILURE;
 
@@ -323,7 +351,7 @@ nsresult nsScreencastService::StartVideoRecording(nsIScreencastServiceClient* aC
   margin.top += offsetTop;
 
   nsCString error;
-  RefPtr<ScreencastEncoder> encoder;
+  std::unique_ptr<ScreencastEncoder> encoder;
   if (isVideo) {
     encoder = ScreencastEncoder::create(error, PromiseFlatCString(aVideoFileName), width, height, margin);
     if (!encoder) {
@@ -337,7 +365,7 @@ nsresult nsScreencastService::StartVideoRecording(nsIScreencastServiceClient* aC
   NS_ENSURE_SUCCESS(rv, rv);
   sessionId = uid;
 
-  auto session = std::make_unique<Session>(aClient, std::move(capturer), std::move(encoder), width, height, viewportWidth, viewportHeight, margin, isVideo ? 0 : quality);
+  auto session = Session::Create(aClient, widget, std::move(capturer), std::move(encoder), width, height, viewportWidth, viewportHeight, margin, isVideo ? 0 : quality);
   if (!session->Start())
     return NS_ERROR_FAILURE;
   mIdToSession.emplace(sessionId, std::move(session));

@@ -14,91 +14,100 @@
  * limitations under the License.
  */
 
+import { stringifySelector } from '../../utils/isomorphic/selectorParser';
+import type { ParsedSelector } from '../../utils/isomorphic/selectorParser';
+import type { InjectedScript } from './injectedScript';
+import { asLocator } from '../../utils/isomorphic/locatorGenerators';
+import type { Language } from '../../utils/isomorphic/locatorGenerators';
+import highlightCSS from './highlight.css?inline';
+
+type HighlightEntry = {
+  targetElement: Element,
+  highlightElement: HTMLElement,
+  tooltipElement?: HTMLElement,
+  box?: DOMRect,
+  tooltipTop?: number,
+  tooltipLeft?: number,
+  tooltipText?: string,
+};
+
+export type HighlightOptions = {
+  tooltipText?: string;
+  tooltipList?: string[];
+  tooltipFooter?: string;
+  tooltipListItemSelected?: (index: number | undefined) => void;
+  color?: string;
+};
+
 export class Highlight {
-  private _outerGlassPaneElement: HTMLElement;
+  private _glassPaneElement: HTMLElement;
   private _glassPaneShadow: ShadowRoot;
-  private _innerGlassPaneElement: HTMLElement;
-  private _highlightElements: HTMLElement[] = [];
-  private _tooltipElement: HTMLElement;
+  private _highlightEntries: HighlightEntry[] = [];
+  private _highlightOptions: HighlightOptions = {};
   private _actionPointElement: HTMLElement;
   private _isUnderTest: boolean;
+  private _injectedScript: InjectedScript;
+  private _rafRequest: number | undefined;
+  private _language: Language = 'javascript';
 
-  constructor(isUnderTest: boolean) {
-    this._isUnderTest = isUnderTest;
-    this._outerGlassPaneElement = document.createElement('x-pw-glass');
-    this._outerGlassPaneElement.style.position = 'fixed';
-    this._outerGlassPaneElement.style.top = '0';
-    this._outerGlassPaneElement.style.right = '0';
-    this._outerGlassPaneElement.style.bottom = '0';
-    this._outerGlassPaneElement.style.left = '0';
-    this._outerGlassPaneElement.style.zIndex = '2147483647';
-    this._outerGlassPaneElement.style.pointerEvents = 'none';
-    this._outerGlassPaneElement.style.display = 'flex';
-
-    this._tooltipElement = document.createElement('x-pw-tooltip');
+  constructor(injectedScript: InjectedScript) {
+    this._injectedScript = injectedScript;
+    const document = injectedScript.document;
+    this._isUnderTest = injectedScript.isUnderTest;
+    this._glassPaneElement = document.createElement('x-pw-glass');
+    this._glassPaneElement.style.position = 'fixed';
+    this._glassPaneElement.style.top = '0';
+    this._glassPaneElement.style.right = '0';
+    this._glassPaneElement.style.bottom = '0';
+    this._glassPaneElement.style.left = '0';
+    this._glassPaneElement.style.zIndex = '2147483646';
+    this._glassPaneElement.style.pointerEvents = 'none';
+    this._glassPaneElement.style.display = 'flex';
+    this._glassPaneElement.style.backgroundColor = 'transparent';
+    for (const eventName of ['click', 'auxclick', 'dragstart', 'input', 'keydown', 'keyup', 'pointerdown', 'pointerup', 'mousedown', 'mouseup', 'mouseleave', 'focus', 'scroll']) {
+      this._glassPaneElement.addEventListener(eventName, e => {
+        e.stopPropagation();
+        e.stopImmediatePropagation();
+        if (e.type === 'click' && (e as MouseEvent).button === 0 && this._highlightOptions.tooltipListItemSelected)
+          this._highlightOptions.tooltipListItemSelected(undefined);
+      });
+    }
     this._actionPointElement = document.createElement('x-pw-action-point');
     this._actionPointElement.setAttribute('hidden', 'true');
-
-    this._innerGlassPaneElement = document.createElement('x-pw-glass-inner');
-    this._innerGlassPaneElement.style.flex = 'auto';
-    this._innerGlassPaneElement.appendChild(this._tooltipElement);
-
-    // Use a closed shadow root to prevent selectors matching our internal previews.
-    this._glassPaneShadow = this._outerGlassPaneElement.attachShadow({ mode: this._isUnderTest ? 'open' : 'closed' });
-    this._glassPaneShadow.appendChild(this._innerGlassPaneElement);
+    this._glassPaneShadow = this._glassPaneElement.attachShadow({ mode: this._isUnderTest ? 'open' : 'closed' });
+    // workaround for firefox: when taking screenshots, it complains adoptedStyleSheets.push
+    // is not a function, so we fallback to style injection
+    if (typeof this._glassPaneShadow.adoptedStyleSheets.push === 'function') {
+      const sheet = new this._injectedScript.window.CSSStyleSheet();
+      sheet.replaceSync(highlightCSS);
+      this._glassPaneShadow.adoptedStyleSheets.push(sheet);
+    } else {
+      const styleElement = this._injectedScript.document.createElement('style');
+      styleElement.textContent = highlightCSS;
+      this._glassPaneShadow.appendChild(styleElement);
+    }
     this._glassPaneShadow.appendChild(this._actionPointElement);
-    const styleElement = document.createElement('style');
-    styleElement.textContent = `
-        x-pw-tooltip {
-          align-items: center;
-          backdrop-filter: blur(5px);
-          background-color: rgba(0, 0, 0, 0.7);
-          border-radius: 2px;
-          box-shadow: rgba(0, 0, 0, 0.1) 0px 3.6px 3.7px,
-                      rgba(0, 0, 0, 0.15) 0px 12.1px 12.3px,
-                      rgba(0, 0, 0, 0.1) 0px -2px 4px,
-                      rgba(0, 0, 0, 0.15) 0px -12.1px 24px,
-                      rgba(0, 0, 0, 0.25) 0px 54px 55px;
-          color: rgb(204, 204, 204);
-          display: none;
-          font-family: 'Dank Mono', 'Operator Mono', Inconsolata, 'Fira Mono',
-                      'SF Mono', Monaco, 'Droid Sans Mono', 'Source Code Pro', monospace;
-          font-size: 12.8px;
-          font-weight: normal;
-          left: 0;
-          line-height: 1.5;
-          max-width: 600px;
-          padding: 3.2px 5.12px 3.2px;
-          position: absolute;
-          top: 0;
-        }
-        x-pw-action-point {
-          position: absolute;
-          width: 20px;
-          height: 20px;
-          background: red;
-          border-radius: 10px;
-          pointer-events: none;
-          margin: -10px 0 0 -10px;
-          z-index: 2;
-        }
-        *[hidden] {
-          display: none !important;
-        }
-    `;
-    this._glassPaneShadow.appendChild(styleElement);
   }
 
   install() {
-    document.documentElement.appendChild(this._outerGlassPaneElement);
+    this._injectedScript.document.documentElement.appendChild(this._glassPaneElement);
+  }
+
+  setLanguage(language: Language) {
+    this._language = language;
+  }
+
+  runHighlightOnRaf(selector: ParsedSelector) {
+    if (this._rafRequest)
+      cancelAnimationFrame(this._rafRequest);
+    this.updateHighlight(this._injectedScript.querySelectorAll(selector, this._injectedScript.document.documentElement), { tooltipText: asLocator(this._language, stringifySelector(selector)) });
+    this._rafRequest = this._injectedScript.builtinRequestAnimationFrame(() => this.runHighlightOnRaf(selector));
   }
 
   uninstall() {
-    this._outerGlassPaneElement.remove();
-  }
-
-  isInstalled(): boolean {
-    return this._outerGlassPaneElement.parentElement === document.documentElement && !this._outerGlassPaneElement.nextElementSibling;
+    if (this._rafRequest)
+      cancelAnimationFrame(this._rafRequest);
+    this._glassPaneElement.remove();
   }
 
   showActionPoint(x: number, y: number) {
@@ -111,74 +120,173 @@ export class Highlight {
     this._actionPointElement.hidden = true;
   }
 
-  updateHighlight(elements: Element[], selector: string, isRecording: boolean) {
+  clearHighlight() {
+    for (const entry of this._highlightEntries) {
+      entry.highlightElement?.remove();
+      entry.tooltipElement?.remove();
+    }
+    this._highlightEntries = [];
+    this._highlightOptions = {};
+    this._glassPaneElement.style.pointerEvents = 'none';
+  }
+
+  updateHighlight(elements: Element[], options: HighlightOptions) {
+    this._innerUpdateHighlight(elements, options);
+  }
+
+  maskElements(elements: Element[], color: string) {
+    this._innerUpdateHighlight(elements, { color: color });
+  }
+
+  private _innerUpdateHighlight(elements: Element[], options: HighlightOptions) {
+    let color = options.color;
+    if (!color)
+      color = elements.length > 1 ? '#f6b26b7f' : '#6fa8dc7f';
+
     // Code below should trigger one layout and leave with the
     // destroyed layout.
 
-    // Destroy the layout
-    this._tooltipElement.textContent = selector;
-    this._tooltipElement.style.top = '0';
-    this._tooltipElement.style.left = '0';
-    this._tooltipElement.style.display = 'flex';
+    if (this._highlightIsUpToDate(elements, options))
+      return;
 
-    // Trigger layout.
-    const boxes = elements.map(e => e.getBoundingClientRect());
-    const tooltipWidth = this._tooltipElement.offsetWidth;
-    const tooltipHeight = this._tooltipElement.offsetHeight;
-    const totalWidth = this._innerGlassPaneElement.offsetWidth;
-    const totalHeight = this._innerGlassPaneElement.offsetHeight;
+    // 1. Destroy the layout
+    this.clearHighlight();
+    this._highlightOptions = options;
+    this._glassPaneElement.style.pointerEvents = options.tooltipListItemSelected ? 'initial' : 'none';
 
-    // Destroy the layout again.
-    if (boxes.length) {
-      const primaryBox = boxes[0];
-      let anchorLeft = primaryBox.left;
-      if (anchorLeft + tooltipWidth > totalWidth - 5)
-        anchorLeft = totalWidth - tooltipWidth - 5;
-      let anchorTop = primaryBox.bottom + 5;
-      if (anchorTop + tooltipHeight > totalHeight - 5) {
-        // If can't fit below, either position above...
-        if (primaryBox.top > tooltipHeight + 5) {
-          anchorTop = primaryBox.top - tooltipHeight - 5;
-        } else {
-          // Or on top in case of large element
-          anchorTop = totalHeight - 5 - tooltipHeight;
+    for (let i = 0; i < elements.length; ++i) {
+      const highlightElement = this._createHighlightElement();
+      this._glassPaneShadow.appendChild(highlightElement);
+
+      let tooltipElement;
+      if (options.tooltipList || options.tooltipText || options.tooltipFooter) {
+        tooltipElement = this._injectedScript.document.createElement('x-pw-tooltip');
+        this._glassPaneShadow.appendChild(tooltipElement);
+        tooltipElement.style.top = '0';
+        tooltipElement.style.left = '0';
+        tooltipElement.style.display = 'flex';
+        let lines: string[] = [];
+        if (options.tooltipList) {
+          lines = options.tooltipList;
+        } else if (options.tooltipText) {
+          const suffix = elements.length > 1 ? ` [${i + 1} of ${elements.length}]` : '';
+          lines = [options.tooltipText + suffix];
+        }
+        for (let index = 0; index < lines.length; index++) {
+          const element = this._injectedScript.document.createElement('x-pw-tooltip-line');
+          element.textContent = lines[index];
+          tooltipElement.appendChild(element);
+          if (options.tooltipListItemSelected) {
+            element.classList.add('selectable');
+            element.addEventListener('click', () => options.tooltipListItemSelected?.(index));
+          }
+        }
+        if (options.tooltipFooter) {
+          const footer = this._injectedScript.document.createElement('x-pw-tooltip-footer');
+          footer.textContent = options.tooltipFooter;
+          tooltipElement.appendChild(footer);
         }
       }
-      this._tooltipElement.style.top = anchorTop + 'px';
-      this._tooltipElement.style.left = anchorLeft + 'px';
-    } else {
-      this._tooltipElement.style.display = 'none';
+      this._highlightEntries.push({ targetElement: elements[i], tooltipElement, highlightElement });
     }
 
-    const pool = this._highlightElements;
-    this._highlightElements = [];
-    for (const box of boxes) {
-      const highlightElement = pool.length ? pool.shift()! : this._createHighlightElement();
-      const color = isRecording ? '#dc6f6f7f' : '#6fa8dc7f';
-      highlightElement.style.backgroundColor = this._highlightElements.length ? '#f6b26b7f' : color;
-      highlightElement.style.left = box.x + 'px';
-      highlightElement.style.top = box.y + 'px';
-      highlightElement.style.width = box.width + 'px';
-      highlightElement.style.height = box.height + 'px';
-      highlightElement.style.display = 'block';
-      this._highlightElements.push(highlightElement);
+    // 2. Trigger layout while positioning tooltips and computing bounding boxes.
+    for (const entry of this._highlightEntries) {
+      entry.box = entry.targetElement.getBoundingClientRect();
+      if (!entry.tooltipElement)
+        continue;
+
+      // Position tooltip, if any.
+      const { anchorLeft, anchorTop } = this.tooltipPosition(entry.box, entry.tooltipElement);
+      entry.tooltipTop = anchorTop;
+      entry.tooltipLeft = anchorLeft;
     }
 
-    for (const highlightElement of pool) {
-      highlightElement.style.display = 'none';
-      this._highlightElements.push(highlightElement);
+    // 3. Destroy the layout again.
+
+    // If there are more than 1 box - we are evaluating a non-unique (potentially bad) selector.
+    for (const entry of this._highlightEntries) {
+      if (entry.tooltipElement) {
+        entry.tooltipElement.style.top = entry.tooltipTop + 'px';
+        entry.tooltipElement.style.left = entry.tooltipLeft + 'px';
+      }
+      const box = entry.box!;
+      entry.highlightElement.style.backgroundColor = color;
+      entry.highlightElement.style.left = box.x + 'px';
+      entry.highlightElement.style.top = box.y + 'px';
+      entry.highlightElement.style.width = box.width + 'px';
+      entry.highlightElement.style.height = box.height + 'px';
+      entry.highlightElement.style.display = 'block';
+
+      if (this._isUnderTest)
+        console.error('Highlight box for test: ' + JSON.stringify({ x: box.x, y: box.y, width: box.width, height: box.height })); // eslint-disable-line no-console
     }
   }
 
+  firstBox(): DOMRect | undefined {
+    return this._highlightEntries[0]?.box;
+  }
+
+  tooltipPosition(box: DOMRect, tooltipElement: HTMLElement) {
+    const tooltipWidth = tooltipElement.offsetWidth;
+    const tooltipHeight = tooltipElement.offsetHeight;
+    const totalWidth = this._glassPaneElement.offsetWidth;
+    const totalHeight = this._glassPaneElement.offsetHeight;
+
+    let anchorLeft = box.left;
+    if (anchorLeft + tooltipWidth > totalWidth - 5)
+      anchorLeft = totalWidth - tooltipWidth - 5;
+    let anchorTop = box.bottom + 5;
+    if (anchorTop + tooltipHeight > totalHeight - 5) {
+      // If can't fit below, either position above...
+      if (box.top > tooltipHeight + 5) {
+        anchorTop = box.top - tooltipHeight - 5;
+      } else {
+        // Or on top in case of large element
+        anchorTop = totalHeight - 5 - tooltipHeight;
+      }
+    }
+    return { anchorLeft, anchorTop };
+  }
+
+  private _highlightIsUpToDate(elements: Element[], options: HighlightOptions): boolean {
+    if (options.tooltipText !== this._highlightOptions.tooltipText)
+      return false;
+    if (options.tooltipListItemSelected !== this._highlightOptions.tooltipListItemSelected)
+      return false;
+    if (options.tooltipFooter !== this._highlightOptions.tooltipFooter)
+      return false;
+
+    if (options.tooltipList?.length !== this._highlightOptions.tooltipList?.length)
+      return false;
+    if (options.tooltipList && this._highlightOptions.tooltipList) {
+      for (let i = 0; i < options.tooltipList.length; i++) {
+        if (options.tooltipList[i] !== this._highlightOptions.tooltipList[i])
+          return false;
+      }
+    }
+
+    if (elements.length !== this._highlightEntries.length)
+      return false;
+    for (let i = 0; i < this._highlightEntries.length; ++i) {
+      if (elements[i] !== this._highlightEntries[i].targetElement)
+        return false;
+      const oldBox = this._highlightEntries[i].box;
+      if (!oldBox)
+        return false;
+      const box = elements[i].getBoundingClientRect();
+      if (box.top !== oldBox.top || box.right !== oldBox.right || box.bottom !== oldBox.bottom || box.left !== oldBox.left)
+        return false;
+    }
+
+    return true;
+  }
+
   private _createHighlightElement(): HTMLElement {
-    const highlightElement = document.createElement('x-pw-highlight');
-    highlightElement.style.position = 'absolute';
-    highlightElement.style.top = '0';
-    highlightElement.style.left = '0';
-    highlightElement.style.width = '0';
-    highlightElement.style.height = '0';
-    highlightElement.style.boxSizing = 'border-box';
-    this._glassPaneShadow.appendChild(highlightElement);
-    return highlightElement;
+    return this._injectedScript.document.createElement('x-pw-highlight');
+  }
+
+  appendChild(element: HTMLElement) {
+    this._glassPaneShadow.appendChild(element);
   }
 }

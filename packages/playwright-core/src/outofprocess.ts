@@ -15,10 +15,11 @@
  */
 
 import { Connection } from './client/connection';
-import { Transport } from './protocol/transport';
-import { Playwright } from './client/playwright';
+import { PipeTransport } from './protocol/transport';
+import type { Playwright } from './client/playwright';
 import * as childProcess from 'child_process';
 import * as path from 'path';
+import { ManualPromise } from './utils/manualPromise';
 
 export async function start(env: any = {}): Promise<{ playwright: Playwright, stop: () => Promise<void> }> {
   const client = new PlaywrightClient(env);
@@ -30,15 +31,10 @@ export async function start(env: any = {}): Promise<{ playwright: Playwright, st
 class PlaywrightClient {
   _playwright: Promise<Playwright>;
   _driverProcess: childProcess.ChildProcess;
-  private _closePromise: Promise<void>;
-  private _onExit: (exitCode: number | null, signal: string | null) => {};
+  private _closePromise = new ManualPromise<void>();
 
   constructor(env: any) {
-    this._onExit = (exitCode: number | null, signal: string | null) => {
-      throw new Error(`Server closed with exitCode=${exitCode} signal=${signal}`);
-    };
-
-    this._driverProcess = childProcess.fork(path.join(__dirname, 'cli', 'cli.js'), ['run-driver'], {
+    this._driverProcess = childProcess.fork(path.join(__dirname, '..', 'cli.js'), ['run-driver'], {
       stdio: 'pipe',
       detached: true,
       env: {
@@ -47,19 +43,18 @@ class PlaywrightClient {
       },
     });
     this._driverProcess.unref();
-    this._driverProcess.on('exit', this._onExit);
+    this._driverProcess.stderr!.on('data', data => process.stderr.write(data));
 
-    const connection = new Connection();
-    const transport = new Transport(this._driverProcess.stdin!, this._driverProcess.stdout!);
+    const connection = new Connection(undefined, undefined);
+    const transport = new PipeTransport(this._driverProcess.stdin!, this._driverProcess.stdout!);
     connection.onmessage = message => transport.send(JSON.stringify(message));
     transport.onmessage = message => connection.dispatch(JSON.parse(message));
-    this._closePromise = new Promise(f => transport.onclose = f);
+    transport.onclose = () => this._closePromise.resolve();
 
     this._playwright = connection.initializePlaywright();
   }
 
   async stop() {
-    this._driverProcess.removeListener('exit', this._onExit);
     this._driverProcess.stdin!.destroy();
     this._driverProcess.stdout!.destroy();
     this._driverProcess.stderr!.destroy();

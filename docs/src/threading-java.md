@@ -3,6 +3,8 @@ id: multithreading
 title: "Multithreading"
 ---
 
+## Introduction
+
 Playwright Java is not thread safe, i.e. all its methods as well as methods on all objects created by it (such as [BrowserContext], [Browser], [Page] etc.) are expected to be called on the same thread where the Playwright object was created or proper synchronization should be implemented to ensure only one thread calls Playwright methods at any given time. Having said that it's okay to create multiple Playwright instances each on its own thread.
 
 Here is an example where three playwright instances are created each on its own thread. Each instance launches its own browser process and runs the test against it.
@@ -37,7 +39,7 @@ public class PlaywrightThread extends Thread {
       BrowserType browserType = getBrowserType(playwright, browserName);
       Browser browser = browserType.launch();
       Page page = browser.newPage();
-      page.navigate("http://whatsmyuseragent.org/");
+      page.navigate("https://playwright.dev/");
       page.screenshot(new Page.ScreenshotOptions().setPath(Paths.get("user-agent-" + browserName + ".png")));
     }
   }

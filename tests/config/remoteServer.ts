@@ -15,34 +15,77 @@
  */
 
 import path from 'path';
-import type { BrowserType, Browser, LaunchOptions } from 'playwright-core';
-import { CommonFixtures, TestChildProcess } from './commonFixtures';
+import type { BrowserType, Browser } from 'playwright-core';
+import type { CommonFixtures, TestChildProcess } from './commonFixtures';
+
+export interface PlaywrightServer {
+  wsEndpoint(): string;
+  close(): Promise<void>;
+}
+
+export class RunServer implements PlaywrightServer {
+  private _process!: TestChildProcess;
+  _wsEndpoint!: string;
+
+  async start(childProcess: CommonFixtures['childProcess'], mode?: 'extension' | 'default', env?: NodeJS.ProcessEnv) {
+    const command = ['node', path.join(__dirname, '..', '..', 'packages', 'playwright-core', 'cli.js'), 'run-server'];
+    if (mode === 'extension')
+      command.push('--mode=extension');
+    this._process = childProcess({
+      command,
+      env: {
+        ...process.env,
+        PWTEST_UNDER_TEST: '1',
+        ...env,
+      },
+    });
+
+    let wsEndpointCallback: (value: string) => void;
+    const wsEndpointPromise = new Promise<string>(f => wsEndpointCallback = f);
+    this._process.onOutput = data => {
+      const prefix = 'Listening on ';
+      const line = data.toString();
+      if (line.startsWith(prefix))
+        wsEndpointCallback(line.substr(prefix.length));
+    };
+
+    this._wsEndpoint = await wsEndpointPromise;
+  }
+
+  wsEndpoint() {
+    return this._wsEndpoint;
+  }
+
+  async close() {
+    await this._process.kill('SIGINT');
+  }
+}
 
 export type RemoteServerOptions = {
   stallOnClose?: boolean;
   disconnectOnSIGHUP?: boolean;
+  exitOnFile?: string;
+  exitOnWarning?: boolean;
   inCluster?: boolean;
   url?: string;
+  startStopAndRunHttp?: boolean;
 };
 
-export class RemoteServer {
-  private _process: TestChildProcess;
-  _output: Map<string, string>;
-  _outputCallback: Map<string, () => void>;
-  _browserType: BrowserType;
-  _exitAndDisconnectPromise: Promise<any>;
-  _browser: Browser;
-  _wsEndpoint: string;
+export class RemoteServer implements PlaywrightServer {
+  private _process!: TestChildProcess;
+  readonly _output = new Map<string, string>();
+  readonly _outputCallback = new Map<string, () => void>();
+  _browserType!: BrowserType;
+  _exitAndDisconnectPromise: Promise<any> | undefined;
+  _browser: Browser | undefined;
+  _wsEndpoint!: string;
 
   async _start(childProcess: CommonFixtures['childProcess'], browserType: BrowserType, remoteServerOptions: RemoteServerOptions = {}) {
-    this._output = new Map();
-    this._outputCallback = new Map();
-
     this._browserType = browserType;
     const browserOptions = (browserType as any)._defaultLaunchOptions;
     // Copy options to prevent a large JSON string when launching subprocess.
     // Otherwise, we get `Error: spawn ENAMETOOLONG` on Windows.
-    const launchOptions: LaunchOptions = {
+    const launchOptions: Parameters<BrowserType['launchServer']>[0] = {
       args: browserOptions.args,
       headless: browserOptions.headless,
       channel: browserOptions.channel,
@@ -59,6 +102,7 @@ export class RemoteServer {
     };
     this._process = childProcess({
       command: ['node', path.join(__dirname, 'remote-server-impl.js'), JSON.stringify(options)],
+      env: { ...process.env, PWTEST_UNDER_TEST: '1' },
     });
 
     let index = 0;
@@ -68,7 +112,7 @@ export class RemoteServer {
         const key = match[1];
         const value = match[2];
         this._addOutput(key, value);
-        index += match.index + match[0].length;
+        index += match.index! + match[0].length;
       }
     };
 
@@ -89,10 +133,10 @@ export class RemoteServer {
       cb();
   }
 
-  async out(key: string) {
+  async out(key: string): Promise<string> {
     if (!this._output.has(key))
       await new Promise<void>(f => this._outputCallback.set(key, f));
-    return this._output.get(key);
+    return this._output.get(key)!;
   }
 
   wsEndpoint() {
@@ -107,12 +151,16 @@ export class RemoteServer {
     return await this._process.exitCode;
   }
 
+  async childSignal() {
+    return (await this._process.exited).signal;
+  }
+
   async close() {
     if (this._browser) {
       await this._browser.close();
       this._browser = undefined;
     }
-    await this._process.close();
-    return await this.childExitCode();
+    await this._process.kill('SIGINT');
+    await this.childExitCode();
   }
 }

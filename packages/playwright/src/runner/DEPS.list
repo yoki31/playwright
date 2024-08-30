@@ -1,0 +1,12 @@
+[*]
+../../types.ts
+../common/
+../reporters/
+../third_party/
+../transform/
+../plugins/
+../util.ts
+../utilsBundle.ts
+../isomorphic/folders.ts
+../isomorphic/teleReceiver.ts
+../fsWatcher.ts

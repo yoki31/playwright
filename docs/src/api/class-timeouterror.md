@@ -1,8 +1,8 @@
 # class: TimeoutError
+* since: v1.8
 * extends: [Error]
 
-TimeoutError is emitted whenever certain operations are terminated due to timeout, e.g. [`method:
-Locator.waitFor`] or [`method: BrowserType.launch`].
+TimeoutError is emitted whenever certain operations are terminated due to timeout, e.g. [`method: Locator.waitFor`] or [`method: BrowserType.launch`].
 
 ```js
 const playwright = require('playwright');
@@ -12,12 +12,12 @@ const playwright = require('playwright');
   const context = await browser.newContext();
   const page = await context.newPage();
   try {
-    await page.click("text=Foo", {
+    await page.locator('text=Foo').click({
       timeout: 100,
-    })
+    });
   } catch (error) {
     if (error instanceof playwright.errors.TimeoutError)
-      console.log("Timeout!")
+      console.log('Timeout!');
   }
   await browser.close();
 })();
@@ -25,13 +25,13 @@ const playwright = require('playwright');
 
 ```python async
 import asyncio
-from playwright.async_api import async_playwright, TimeoutError as PlaywrightTimeoutError
+from playwright.async_api import async_playwright, TimeoutError as PlaywrightTimeoutError, Playwright
 
-async def run(playwright):
+async def run(playwright: Playwright):
     browser = await playwright.chromium.launch()
     page = await browser.new_page()
     try:
-      await page.click("text=Example", timeout=100)
+      await page.locator("text=Example").click(timeout=100)
     except PlaywrightTimeoutError:
       print("Timeout!")
     await browser.close()
@@ -50,7 +50,7 @@ with sync_playwright() as p:
     browser = p.chromium.launch()
     page = browser.new_page()
     try:
-      page.click("text=Example", timeout=100)
+      page.locator("text=Example").click(timeout=100)
     except PlaywrightTimeoutError:
       print("Timeout!")
     browser.close()
@@ -68,7 +68,7 @@ public class TimeoutErrorExample {
       BrowserContext context = browser.newContext();
       Page page = context.newPage();
       try {
-        page.click("text=Example", new Page.ClickOptions().setTimeout(100));
+        page.locator("text=Example").click(new Locator.ClickOptions().setTimeout(100));
       } catch (TimeoutError e) {
         System.out.println("Timeout!");
       }
@@ -78,25 +78,17 @@ public class TimeoutErrorExample {
 ```
 
 ```csharp
-using System.Threading.Tasks;
 using Microsoft.Playwright;
-using System;
 
-class Program
+using var playwright = await Playwright.CreateAsync();
+await using var browser = await playwright.Chromium.LaunchAsync();
+var page = await browser.NewPageAsync();
+try
 {
-    public static async Task Main()
-    {
-        using var playwright = await Playwright.CreateAsync();
-        await using var browser = await playwright.Chromium.LaunchAsync();
-        var page = await browser.NewPageAsync();
-        try
-        {
-            await page.ClickAsync("text=Example", new() { Timeout = 100 });
-        }
-        catch (TimeoutException)
-        {
-            Console.WriteLine("Timeout!");
-        }
-    }
+    await page.ClickAsync("text=Example", new() { Timeout = 100 });
+}
+catch (TimeoutException)
+{
+    Console.WriteLine("Timeout!");
 }
 ```

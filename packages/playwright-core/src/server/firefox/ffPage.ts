@@ -17,27 +17,31 @@
 
 import * as dialog from '../dialog';
 import * as dom from '../dom';
-import * as frames from '../frames';
-import { eventsHelper, RegisteredListener } from '../../utils/eventsHelper';
-import { assert } from '../../utils/utils';
-import { Page, PageBinding, PageDelegate, Worker } from '../page';
-import * as types from '../types';
+import type * as frames from '../frames';
+import type { RegisteredListener } from '../../utils/eventsHelper';
+import { eventsHelper } from '../../utils/eventsHelper';
+import type { PageDelegate } from '../page';
+import { InitScript } from '../page';
+import { Page, Worker } from '../page';
+import type * as types from '../types';
 import { getAccessibilityTree } from './ffAccessibility';
-import { FFBrowserContext } from './ffBrowser';
-import { FFSession, FFSessionEvents } from './ffConnection';
+import type { FFBrowserContext } from './ffBrowser';
+import { FFSession } from './ffConnection';
 import { FFExecutionContext } from './ffExecutionContext';
 import { RawKeyboardImpl, RawMouseImpl, RawTouchscreenImpl } from './ffInput';
 import { FFNetworkManager } from './ffNetworkManager';
-import { Protocol } from './protocol';
-import { Progress } from '../progress';
+import type { Protocol } from './protocol';
+import type { Progress } from '../progress';
 import { splitErrorMessage } from '../../utils/stackTrace';
 import { debugLogger } from '../../utils/debugLogger';
-import { ManualPromise } from '../../utils/async';
+import { ManualPromise } from '../../utils/manualPromise';
+import { BrowserContext } from '../browserContext';
+import { TargetClosedError } from '../errors';
 
 export const UTILITY_WORLD_NAME = '__playwright_utility_world__';
 
 export class FFPage implements PageDelegate {
-  readonly cspErrorsAsynchronousForInlineScipts = true;
+  readonly cspErrorsAsynchronousForInlineScripts = true;
   readonly rawMouse: RawMouseImpl;
   readonly rawKeyboard: RawKeyboardImpl;
   readonly rawTouchscreen: RawTouchscreenImpl;
@@ -53,6 +57,7 @@ export class FFPage implements PageDelegate {
   private _eventListeners: RegisteredListener[];
   private _workers = new Map<string, { frameId: string, session: FFSession }>();
   private _screencastId: string | undefined;
+  private _initScripts: { initScript: InitScript, worldName?: string }[] = [];
 
   constructor(session: FFSession, browserContext: FFBrowserContext, opener: FFPage | null) {
     this._session = session;
@@ -77,6 +82,7 @@ export class FFPage implements PageDelegate {
       eventsHelper.addEventListener(this._session, 'Page.sameDocumentNavigation', this._onSameDocumentNavigation.bind(this)),
       eventsHelper.addEventListener(this._session, 'Runtime.executionContextCreated', this._onExecutionContextCreated.bind(this)),
       eventsHelper.addEventListener(this._session, 'Runtime.executionContextDestroyed', this._onExecutionContextDestroyed.bind(this)),
+      eventsHelper.addEventListener(this._session, 'Runtime.executionContextsCleared', this._onExecutionContextsCleared.bind(this)),
       eventsHelper.addEventListener(this._session, 'Page.linkClicked', event => this._onLinkClicked(event.phase)),
       eventsHelper.addEventListener(this._session, 'Page.uncaughtError', this._onUncaughtError.bind(this)),
       eventsHelper.addEventListener(this._session, 'Runtime.console', this._onConsole.bind(this)),
@@ -96,10 +102,6 @@ export class FFPage implements PageDelegate {
       eventsHelper.addEventListener(this._session, 'Page.screencastFrame', this._onScreencastFrame.bind(this)),
 
     ];
-    session.once(FFSessionEvents.Disconnected, () => {
-      this._markAsError(new Error('Page closed'));
-      this._page._didDisconnect();
-    });
     this._session.once('Page.ready', async () => {
       await this._page.initOpener(this._opener);
       if (this._initializationFailed)
@@ -112,7 +114,11 @@ export class FFPage implements PageDelegate {
     });
     // Ideally, we somehow ensure that utility world is created before Page.ready arrives, but currently it is racy.
     // Therefore, we can end up with an initialized page without utility world, although very unlikely.
-    this._session.send('Page.addScriptToEvaluateOnNewDocument', { script: '', worldName: UTILITY_WORLD_NAME }).catch(e => this._markAsError(e));
+    this.addInitScript(new InitScript('', true), UTILITY_WORLD_NAME).catch(e => this._markAsError(e));
+  }
+
+  potentiallyUninitializedPage(): Page {
+    return this._page;
   }
 
   async _markAsError(error: Error) {
@@ -178,6 +184,11 @@ export class FFPage implements PageDelegate {
     context.frame._contextDestroyed(context);
   }
 
+  _onExecutionContextsCleared() {
+    for (const executionContextId of Array.from(this._contextIdToContext.keys()))
+      this._onExecutionContextDestroyed({ executionContextId });
+  }
+
   private _removeContextsForFrame(frame: frames.Frame) {
     for (const [contextId, context] of this._contextIdToContext) {
       if (context.frame === frame)
@@ -233,7 +244,7 @@ export class FFPage implements PageDelegate {
     const error = new Error(message);
     error.stack = params.message + '\n' + params.stack.split('\n').filter(Boolean).map(a => a.replace(/([^@]*)@(.*)/, '    at $1 ($2)')).join('\n');
     error.name = name;
-    this._page.firePageError(error);
+    this._page.emitOnContextOnceInitialized(BrowserContext.Events.PageError, error, this._page);
   }
 
   _onConsole(payload: Protocol.Runtime.consolePayload) {
@@ -241,11 +252,12 @@ export class FFPage implements PageDelegate {
     const context = this._contextIdToContext.get(executionContextId);
     if (!context)
       return;
-    this._page._addConsoleMessage(type, args.map(arg => context.createHandle(arg)), location);
+    // Juggler reports 'warn' for some internal messages generated by the browser.
+    this._page._addConsoleMessage(type === 'warn' ? 'warning' : type, args.map(arg => context.createHandle(arg)), location);
   }
 
   _onDialogOpened(params: Protocol.Page.dialogOpenedPayload) {
-    this._page.emit(Page.Events.Dialog, new dialog.Dialog(
+    this._page.emitOnContext(BrowserContext.Events.Dialog, new dialog.Dialog(
         this._page,
         params.type,
         params.message,
@@ -324,11 +336,8 @@ export class FFPage implements PageDelegate {
     this._browserContext._browser._videoStarted(this._browserContext, event.screencastId, event.file, this.pageOrError());
   }
 
-  async exposeBinding(binding: PageBinding) {
-    await this._session.send('Page.addBinding', { name: binding.name, script: binding.source });
-  }
-
   didClose() {
+    this._markAsError(new TargetClosedError());
     this._session.dispose();
     eventsHelper.removeEventListeners(this._eventListeners);
     this._networkManager.dispose();
@@ -341,17 +350,12 @@ export class FFPage implements PageDelegate {
   }
 
   async updateExtraHTTPHeaders(): Promise<void> {
-    await this._session.send('Network.setExtraHTTPHeaders', { headers: this._page._state.extraHTTPHeaders || [] });
+    await this._session.send('Network.setExtraHTTPHeaders', { headers: this._page.extraHTTPHeaders() || [] });
   }
 
-  async setEmulatedSize(emulatedSize: types.EmulatedSize): Promise<void> {
-    assert(this._page._state.emulatedSize === emulatedSize);
-    await this._session.send('Page.setViewportSize', {
-      viewportSize: {
-        width: emulatedSize.viewport.width,
-        height: emulatedSize.viewport.height,
-      },
-    });
+  async updateEmulatedViewportSize(): Promise<void> {
+    const viewportSize = this._page.viewportSize();
+    await this._session.send('Page.setViewportSize', { viewportSize });
   }
 
   async bringToFront(): Promise<void> {
@@ -359,12 +363,13 @@ export class FFPage implements PageDelegate {
   }
 
   async updateEmulateMedia(): Promise<void> {
-    const colorScheme = this._page._state.colorScheme === null ? undefined : this._page._state.colorScheme;
-    const reducedMotion = this._page._state.reducedMotion === null ? undefined : this._page._state.reducedMotion;
-    const forcedColors = this._page._state.forcedColors === null ? undefined : this._page._state.forcedColors;
+    const emulatedMedia = this._page.emulatedMedia();
+    const colorScheme = emulatedMedia.colorScheme === 'no-override' ? undefined : emulatedMedia.colorScheme;
+    const reducedMotion = emulatedMedia.reducedMotion === 'no-override' ? undefined : emulatedMedia.reducedMotion;
+    const forcedColors = emulatedMedia.forcedColors === 'no-override' ? undefined : emulatedMedia.forcedColors;
     await this._session.send('Page.setEmulatedMedia', {
       // Empty string means reset.
-      type: this._page._state.mediaType === null ? '' : this._page._state.mediaType,
+      type: emulatedMedia.media === 'no-override' ? '' : emulatedMedia.media,
       colorScheme,
       reducedMotion,
       forcedColors,
@@ -372,15 +377,16 @@ export class FFPage implements PageDelegate {
   }
 
   async updateRequestInterception(): Promise<void> {
-    await this._networkManager.setRequestInterception(this._page._needsRequestInterception());
+    await this._networkManager.setRequestInterception(this._page.needsRequestInterception());
   }
 
-  async setFileChooserIntercepted(enabled: boolean) {
-    await this._session.send('Page.setInterceptFileChooserDialog', { enabled }).catch(e => {}); // target can be closed.
+  async updateFileChooserInterception() {
+    const enabled = this._page.fileChooserIntercepted();
+    await this._session.send('Page.setInterceptFileChooserDialog', { enabled }).catch(() => {}); // target can be closed.
   }
 
   async reload(): Promise<void> {
-    await this._session.send('Page.reload', { frameId: this._page.mainFrame()._id });
+    await this._session.send('Page.reload');
   }
 
   async goBack(): Promise<boolean> {
@@ -393,8 +399,14 @@ export class FFPage implements PageDelegate {
     return success;
   }
 
-  async evaluateOnNewDocument(source: string): Promise<void> {
-    await this._session.send('Page.addScriptToEvaluateOnNewDocument', { script: source });
+  async addInitScript(initScript: InitScript, worldName?: string): Promise<void> {
+    this._initScripts.push({ initScript, worldName });
+    await this._session.send('Page.setInitScripts', { scripts: this._initScripts.map(s => ({ script: s.initScript.source, worldName: s.worldName })) });
+  }
+
+  async removeNonInternalInitScripts() {
+    this._initScripts = this._initScripts.filter(s => s.initScript.internal);
+    await this._session.send('Page.setInitScripts', { scripts: this._initScripts.map(s => ({ script: s.initScript.source, worldName: s.worldName })) });
   }
 
   async closePage(runBeforeUnload: boolean): Promise<void> {
@@ -406,7 +418,7 @@ export class FFPage implements PageDelegate {
       throw new Error('Not implemented');
   }
 
-  async takeScreenshot(progress: Progress, format: 'png' | 'jpeg', documentRect: types.Rect | undefined, viewportRect: types.Rect | undefined, quality: number | undefined): Promise<Buffer> {
+  async takeScreenshot(progress: Progress, format: 'png' | 'jpeg', documentRect: types.Rect | undefined, viewportRect: types.Rect | undefined, quality: number | undefined, fitsViewport: boolean, scale: 'css' | 'device'): Promise<Buffer> {
     if (!documentRect) {
       const scrollOffset = await this._page.mainFrame().waitForFunctionValueInUtility(progress, () => ({ x: window.scrollX, y: window.scrollY }));
       documentRect = {
@@ -416,12 +428,12 @@ export class FFPage implements PageDelegate {
         height: viewportRect!.height,
       };
     }
-    // TODO: remove fullPage option from Page.screenshot.
-    // TODO: remove Page.getBoundingBox method.
     progress.throwIfAborted();
     const { data } = await this._session.send('Page.screenshot', {
       mimeType: ('image/' + format) as ('image/png' | 'image/jpeg'),
       clip: documentRect,
+      quality,
+      omitDeviceScaleFactor: scale === 'css',
     });
     return Buffer.from(data, 'base64');
   }
@@ -517,12 +529,20 @@ export class FFPage implements PageDelegate {
     });
     if (!result)
       return null;
-    return result.quads.map(quad => [ quad.p1, quad.p2, quad.p3, quad.p4 ]);
+    return result.quads.map(quad => [quad.p1, quad.p2, quad.p3, quad.p4]);
   }
 
   async setInputFiles(handle: dom.ElementHandle<HTMLInputElement>, files: types.FilePayload[]): Promise<void> {
     await handle.evaluateInUtility(([injected, node, files]) =>
       injected.setInputFiles(node, files), files);
+  }
+
+  async setInputFilePaths(handle: dom.ElementHandle<HTMLInputElement>, files: string[]): Promise<void> {
+    await this._session.send('Page.setFileInputFiles', {
+      frameId: handle._context.frame._id,
+      objectId: handle._objectId,
+      files
+    });
   }
 
   async adoptElementHandle<T extends Node>(handle: dom.ElementHandle<T>, to: dom.FrameExecutionContext): Promise<dom.ElementHandle<T>> {
@@ -543,21 +563,30 @@ export class FFPage implements PageDelegate {
   async inputActionEpilogue(): Promise<void> {
   }
 
+  async resetForReuse(): Promise<void> {
+    // Firefox sometimes keeps the last mouse position in the page,
+    // which affects things like hovered state.
+    // See https://github.com/microsoft/playwright/issues/22432.
+    // Move mouse to (-1, -1) to avoid anything being hovered.
+    await this.rawMouse.move(-1, -1, 'none', new Set(), new Set(), false);
+  }
+
   async getFrameElement(frame: frames.Frame): Promise<dom.ElementHandle> {
     const parent = frame.parentFrame();
     if (!parent)
       throw new Error('Frame has been detached.');
-    const info = this._page.parseSelector('frame,iframe');
-    const handles = await this._page.selectors._queryAll(parent, info);
-    const items = await Promise.all(handles.map(async handle => {
-      const frame = await handle.contentFrame().catch(e => null);
-      return { handle, frame };
-    }));
-    const result = items.find(item => item.frame === frame);
-    items.map(item => item === result ? Promise.resolve() : item.handle.dispose());
-    if (!result)
+    const context = await parent._mainContext();
+    const result = await this._session.send('Page.adoptNode', {
+      frameId: frame._id,
+      executionContextId: ((context as any)[contextDelegateSymbol] as FFExecutionContext)._executionContextId
+    });
+    if (!result.remoteObject)
       throw new Error('Frame has been detached.');
-    return result.handle;
+    return context.createHandle(result.remoteObject) as dom.ElementHandle;
+  }
+
+  shouldToggleStyleSheetToSyncAnimations(): boolean {
+    return false;
   }
 }
 

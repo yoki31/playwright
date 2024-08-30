@@ -1,222 +1,112 @@
 ---
 id: intro
-title: "Getting started"
+title: "Installation"
 ---
+## Introduction
 
-<!-- TOC -->
+Playwright was created specifically to accommodate the needs of end-to-end testing. Playwright supports all modern rendering engines including Chromium, WebKit, and Firefox. Test on Windows, Linux, and macOS, locally or on CI, headless or headed with native mobile emulation.
 
-- [Release notes](./release-notes.md)
+The [Playwright library](./library.md) can be used as a general purpose browser automation tool, providing a powerful set of APIs to automate web applications, for both sync and async Python.
 
-## Installation
+This introduction describes the Playwright Pytest plugin, which is the recommended way to write end-to-end tests.
 
-See [system requirements](#system-requirements).
+**You will learn**
 
-### Pip
+- [How to install Playwright Pytest](/intro.md#installing-playwright-pytest)
+- [How to run the example test](/intro.md#running-the-example-test)
 
-[![PyPI version](https://badge.fury.io/py/playwright.svg)](https://pypi.python.org/pypi/playwright/)
+## Installing Playwright Pytest
+
+Playwright recommends using the official [Playwright Pytest plugin](./test-runners.md) to write end-to-end tests. It provides context isolation, running it on multiple browser configurations out of the box.
+
+Get started by installing Playwright and running the example test to see it in action.
+
+<Tabs
+  groupId="package-managers"
+  defaultValue="pypi"
+  values={[
+    {label: 'PyPI', value: 'pypi'},
+    {label: 'Anaconda', value: 'anaconda'}
+  ]
+}>
+<TabItem value="pypi">
+
+Install the [Pytest plugin](https://pypi.org/project/pytest-playwright/):
 
 ```bash
-pip install --upgrade pip
-pip install playwright
-playwright install
+pip install pytest-playwright
 ```
 
-### Conda
+</TabItem>
+<TabItem value="anaconda">
 
-[![Anaconda version](https://img.shields.io/conda/v/microsoft/playwright)](https://anaconda.org/Microsoft/playwright)
+Install the [Pytest plugin](https://anaconda.org/Microsoft/pytest-playwright):
 
 ```bash
 conda config --add channels conda-forge
 conda config --add channels microsoft
-conda install playwright
+conda install pytest-playwright
+```
+
+</TabItem>
+</Tabs>
+
+Install the required browsers:
+
+```bash
 playwright install
 ```
 
-These commands download the Playwright package and install browser binaries for Chromium, Firefox and WebKit. To modify this behavior see [installation parameters](./browsers.md#installing-browsers).
+## Add Example Test
 
-## Usage
+Create a file that follows the `test_` prefix convention, such as `test_example.py`, inside the current working directory or in a sub-directory with the code below. Make sure your test name also follows the `test_` prefix convention.
 
-Once installed, you can `import` Playwright in a Python script, and launch any of the 3 browsers (`chromium`, `firefox` and `webkit`).
+```py title="test_example.py"
+import re
+from playwright.sync_api import Page, expect
 
-```py
-from playwright.sync_api import sync_playwright
+def test_has_title(page: Page):
+    page.goto("https://playwright.dev/")
 
-with sync_playwright() as p:
-    browser = p.chromium.launch()
-    page = browser.new_page()
-    page.goto("http://playwright.dev")
-    print(page.title())
-    browser.close()
+    # Expect a title "to contain" a substring.
+    expect(page).to_have_title(re.compile("Playwright"))
+
+def test_get_started_link(page: Page):
+    page.goto("https://playwright.dev/")
+
+    # Click the get started link.
+    page.get_by_role("link", name="Get started").click()
+
+    # Expects page to have a heading with the name of Installation.
+    expect(page.get_by_role("heading", name="Installation")).to_be_visible()
 ```
 
-Playwright supports two variations of the API: synchronous and asynchronous. If your modern project uses [asyncio](https://docs.python.org/3/library/asyncio.html), you should use async API:
+## Running the Example Test
 
-```py
-import asyncio
-from playwright.async_api import async_playwright
-
-async def main():
-    async with async_playwright() as p:
-        browser = await p.chromium.launch()
-        page = await browser.new_page()
-        await page.goto("http://playwright.dev")
-        print(await page.title())
-        await browser.close()
-
-asyncio.run(main())
-```
-
-## First script
-
-In our first script, we will navigate to `whatsmyuseragent.org` and take a screenshot in WebKit.
-
-```py
-from playwright.sync_api import sync_playwright
-
-with sync_playwright() as p:
-    browser = p.webkit.launch()
-    page = browser.new_page()
-    page.goto("http://whatsmyuseragent.org/")
-    page.screenshot(path="example.png")
-    browser.close()
-```
-
-By default, Playwright runs the browsers in headless mode. To see the browser UI, pass the `headless=False` flag while launching the browser. You can also use [`option: slowMo`] to slow down execution. Learn more in the debugging tools [section](./debug.md).
-
-```py
-firefox.launch(headless=False, slow_mo=50)
-```
-
-## Record scripts
-
-[Command line tools](./cli.md) can be used to record user interactions and generate Python code.
+By default tests will be run on chromium. This can be configured via the [CLI options](./running-tests.md). Tests are run in headless mode meaning no browser UI will open up when running the tests. Results of the tests and test logs will be shown in the terminal.
 
 ```bash
-playwright codegen wikipedia.org
+pytest
 ```
 
-## With Pytest
+## Updating Playwright
 
-See [here](./test-runners.md) for Pytest instructions and examples.
-
-## Interactive mode (REPL)
-
-Blocking REPL, as in CLI via Python directly:
+To update Playwright to the latest version run the following command:
 
 ```bash
-python
+pip install pytest-playwright playwright -U
 ```
-
-```py
->>> from playwright.sync_api import sync_playwright
->>> playwright = sync_playwright().start()
-# Use playwright.chromium, playwright.firefox or playwright.webkit
-# Pass headless=False to launch() to see the browser UI
->>> browser = playwright.chromium.launch()
->>> page = browser.new_page()
->>> page.goto("http://whatsmyuseragent.org/")
->>> page.screenshot(path="example.png")
->>> browser.close()
->>> playwright.stop()
-```
-
-Async REPL such as `asyncio` REPL:
-
-```bash
-python -m asyncio
-```
-
-```py
->>> from playwright.async_api import async_playwright
->>> playwright = await async_playwright().start()
->>> browser = await playwright.chromium.launch()
->>> page = await browser.new_page()
->>> await page.goto("http://whatsmyuseragent.org/")
->>> await page.screenshot(path="example.png")
->>> await browser.close()
->>> await playwright.stop()
-```
-
-## Pyinstaller
-
-You can use Playwright with [Pyinstaller](https://www.pyinstaller.org/) to create standalone executables.
-
-```py
-# main.py
-from playwright.sync_api import sync_playwright
-
-with sync_playwright() as p:
-    browser = p.chromium.launch()
-    page = browser.new_page()
-    page.goto("http://whatsmyuseragent.org/")
-    page.screenshot(path="example.png")
-    browser.close()
-```
-
-If you want to bundle browsers with the executables:
-
-```bash bash-flavor=bash
-PLAYWRIGHT_BROWSERS_PATH=0 playwright install chromium
-pyinstaller -F main.py
-```
-
-```bash bash-flavor=batch
-set PLAYWRIGHT_BROWSERS_PATH=0
-playwright install chromium
-pyinstaller -F main.py
-```
-
-```bash bash-flavor=powershell
-$env:PLAYWRIGHT_BROWSERS_PATH="0"
-playwright install chromium
-pyinstaller -F main.py
-```
-
-:::note
-Bundling the browsers with the executables will generate bigger binaries.
-It is recommended to only bundle the browsers you use.
-:::
-
-## Known issues
-
-### `time.sleep()` leads to outdated state
-
-You should use `page.wait_for_timeout(5000)` instead of `time.sleep(5)` and it is better to not wait for a timeout at all, but sometimes it is useful for debugging. In these cases, use our wait method instead of the `time` module. This is because we internally rely on asynchronous operations and when using `time.sleep(5)` they can't get processed correctly.
-
-
-### incompatible with `SelectorEventLoop` of `asyncio` on Windows
-
-Playwright runs the driver in a subprocess, so it requires `ProactorEventLoop` of `asyncio` on Windows because `SelectorEventLoop` does not supports async subprocesses.
-
-On Windows Python 3.7, Playwright sets the default event loop to `ProactorEventLoop` as it is default on Python 3.8+.
-
-### Threading
-
-Playwright's API is not thread-safe. If you are using Playwright in a multi-threaded environment, you should create a playwright instance per thread. See [threading issue](https://github.com/microsoft/playwright-python/issues/623) for more details.
-
 
 ## System requirements
 
-Playwright requires Python 3.7 or above. The browser binaries for Chromium,
-Firefox and WebKit work across the 3 platforms (Windows, macOS, Linux):
+- Python 3.8 or higher.
+- Windows 10+, Windows Server 2016+ or Windows Subsystem for Linux (WSL).
+- macOS 13 Ventura, or macOS 14 Sonoma.
+- Debian 11, Debian 12, Ubuntu 20.04 or Ubuntu 22.04, Ubuntu 24.04, on x86-64 and arm64 architecture.
 
-### Windows
+## What's next
 
-Works with Windows and Windows Subsystem for Linux (WSL).
-
-### macOS
-
-Requires 10.14 (Mojave) or above.
-
-### Linux
-
-Depending on your Linux distribution, you might need to install additional
-dependencies to run the browsers.
-
-:::note
-Only Ubuntu 18.04 and Ubuntu 20.04 are officially supported.
-:::
-
-See also in the [Command line tools](./cli.md#install-system-dependencies)
-which has a command to install all necessary dependencies automatically for Ubuntu
-LTS releases.
+- [Write tests using web first assertions, page fixtures and locators](./writing-tests.md)
+- [Run single test, multiple tests, headed mode](./running-tests.md)
+- [Generate tests with Codegen](./codegen.md)
+- [See a trace of your tests](./trace-viewer-intro.md)

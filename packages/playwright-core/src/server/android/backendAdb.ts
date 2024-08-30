@@ -14,74 +14,87 @@
  * limitations under the License.
  */
 
-import assert from 'assert';
-import debug from 'debug';
+import { debug } from '../../utilsBundle';
+import type * as channels from '@protocol/channels';
 import * as net from 'net';
 import { EventEmitter } from 'events';
-import { Backend, DeviceBackend, SocketBackend } from './android';
-import { createGuid } from '../../utils/utils';
+import type { Backend, DeviceBackend, SocketBackend } from './android';
+import { assert, createGuid } from '../../utils';
 
 export class AdbBackend implements Backend {
-  async devices(): Promise<DeviceBackend[]> {
-    const result = await runCommand('host:devices');
+  async devices(options: channels.AndroidDevicesOptions = {}): Promise<DeviceBackend[]> {
+    const result = await runCommand('host:devices', options.host, options.port);
     const lines = result.toString().trim().split('\n');
     return lines.map(line => {
       const [serial, status] = line.trim().split('\t');
-      return new AdbDevice(serial, status);
+      return new AdbDevice(serial, status, options.host, options.port);
     });
   }
 }
 
 class AdbDevice implements DeviceBackend {
-  readonly serial: string;
-  readonly status: string;
+  serial: string;
+  status: string;
+  host: string | undefined;
+  port: number | undefined;
+  private _closed = false;
 
-  constructor(serial: string, status: string) {
+  constructor(serial: string, status: string, host?: string, port?: number) {
     this.serial = serial;
     this.status = status;
+    this.host = host;
+    this.port = port;
   }
 
   async init() {
   }
 
   async close() {
+    this._closed = true;
   }
 
   runCommand(command: string): Promise<Buffer> {
-    return runCommand(command, this.serial);
+    if (this._closed)
+      throw new Error('Device is closed');
+    return runCommand(command, this.host, this.port, this.serial);
   }
 
   async open(command: string): Promise<SocketBackend> {
-    const result = await open(command, this.serial);
+    if (this._closed)
+      throw new Error('Device is closed');
+    const result = await open(command, this.host, this.port, this.serial);
     result.becomeSocket();
     return result;
   }
 }
 
-async function runCommand(command: string, serial?: string): Promise<Buffer> {
+async function runCommand(command: string, host: string = '127.0.0.1', port: number = 5037, serial?: string): Promise<Buffer> {
   debug('pw:adb:runCommand')(command, serial);
-  const socket = new BufferedSocketWrapper(command, net.createConnection({ port: 5037 }));
-  if (serial) {
-    await socket.write(encodeMessage(`host:transport:${serial}`));
+  const socket = new BufferedSocketWrapper(command, net.createConnection({ host, port }));
+  try {
+    if (serial) {
+      await socket.write(encodeMessage(`host:transport:${serial}`));
+      const status = await socket.read(4);
+      assert(status.toString() === 'OKAY', status.toString());
+    }
+    await socket.write(encodeMessage(command));
     const status = await socket.read(4);
     assert(status.toString() === 'OKAY', status.toString());
+    let commandOutput: Buffer;
+    if (!command.startsWith('shell:')) {
+      const remainingLength = parseInt((await socket.read(4)).toString(), 16);
+      commandOutput = await socket.read(remainingLength);
+    } else {
+      commandOutput = await socket.readAll();
+    }
+    return commandOutput;
+  } finally {
+    socket.close();
   }
-  await socket.write(encodeMessage(command));
-  const status = await socket.read(4);
-  assert(status.toString() === 'OKAY', status.toString());
-  let commandOutput: Buffer;
-  if (!command.startsWith('shell:')) {
-    const remainingLength = parseInt((await socket.read(4)).toString(), 16);
-    commandOutput = await socket.read(remainingLength);
-  } else {
-    commandOutput = await socket.readAll();
-  }
-  socket.close();
-  return commandOutput;
 }
 
-async function open(command: string, serial?: string): Promise<BufferedSocketWrapper> {
-  const socket = new BufferedSocketWrapper(command, net.createConnection({ port: 5037 }));
+async function open(command: string, host: string = '127.0.0.1', port: number = 5037, serial?: string): Promise<BufferedSocketWrapper> {
+  const socket = new BufferedSocketWrapper(command, net.createConnection({ host, port }));
   if (serial) {
     await socket.write(encodeMessage(`host:transport:${serial}`));
     const status = await socket.read(4);

@@ -15,23 +15,28 @@
  */
 
 import fs from 'fs';
-import { isString, isRegExp } from '../utils/utils';
-import * as channels from '../protocol/channels';
+import { isString, isRegExp, monotonicTime } from '../utils';
+import type * as channels from '@protocol/channels';
 import { Events } from './events';
 import { BrowserContext, prepareBrowserContextParams } from './browserContext';
 import { ChannelOwner } from './channelOwner';
-import * as api from '../../types/types';
-import * as types from './types';
-import { Page } from './page';
-import { TimeoutSettings } from '../utils/timeoutSettings';
+import type * as api from '../../types/types';
+import type * as types from './types';
+import type { Page } from './page';
+import { TimeoutSettings } from '../common/timeoutSettings';
 import { Waiter } from './waiter';
 import { EventEmitter } from 'events';
+import { Connection } from './connection';
+import { isTargetClosedError, TargetClosedError } from './errors';
+import { raceAgainstDeadline } from '../utils/timeoutRunner';
+import type { AndroidServerLauncherImpl } from '../androidServerImpl';
 
 type Direction = 'down' | 'up' | 'left' | 'right';
 type SpeedOptions = { speed?: number };
 
 export class Android extends ChannelOwner<channels.AndroidChannel> implements api.Android {
   readonly _timeoutSettings: TimeoutSettings;
+  _serverLauncher?: AndroidServerLauncherImpl;
 
   static from(android: channels.AndroidChannel): Android {
     return (android as any)._object;
@@ -47,15 +52,72 @@ export class Android extends ChannelOwner<channels.AndroidChannel> implements ap
     this._channel.setDefaultTimeoutNoReply({ timeout });
   }
 
-  async devices(): Promise<AndroidDevice[]> {
-    const { devices } = await this._channel.devices();
+  async devices(options: { port?: number } = {}): Promise<AndroidDevice[]> {
+    const { devices } = await this._channel.devices(options);
     return devices.map(d => AndroidDevice.from(d));
+  }
+
+  async launchServer(options: types.LaunchServerOptions = {}): Promise<api.BrowserServer> {
+    if (!this._serverLauncher)
+      throw new Error('Launching server is not supported');
+    return await this._serverLauncher.launchServer(options);
+  }
+
+  async connect(wsEndpoint: string, options: Parameters<api.Android['connect']>[1] = {}): Promise<api.AndroidDevice> {
+    return await this._wrapApiCall(async () => {
+      const deadline = options.timeout ? monotonicTime() + options.timeout : 0;
+      const headers = { 'x-playwright-browser': 'android', ...options.headers };
+      const localUtils = this._connection.localUtils();
+      const connectParams: channels.LocalUtilsConnectParams = { wsEndpoint, headers, slowMo: options.slowMo, timeout: options.timeout };
+      const { pipe } = await localUtils._channel.connect(connectParams);
+      const closePipe = () => pipe.close().catch(() => {});
+      const connection = new Connection(localUtils, this._instrumentation);
+      connection.markAsRemote();
+      connection.on('close', closePipe);
+
+      let device: AndroidDevice;
+      let closeError: string | undefined;
+      const onPipeClosed = () => {
+        device?._didClose();
+        connection.close(closeError);
+      };
+      pipe.on('closed', onPipeClosed);
+      connection.onmessage = message => pipe.send({ message }).catch(onPipeClosed);
+
+      pipe.on('message', ({ message }) => {
+        try {
+          connection!.dispatch(message);
+        } catch (e) {
+          closeError = String(e);
+          closePipe();
+        }
+      });
+
+      const result = await raceAgainstDeadline(async () => {
+        const playwright = await connection!.initializePlaywright();
+        if (!playwright._initializer.preConnectedAndroidDevice) {
+          closePipe();
+          throw new Error('Malformed endpoint. Did you use Android.launchServer method?');
+        }
+        device = AndroidDevice.from(playwright._initializer.preConnectedAndroidDevice!);
+        device._shouldCloseConnectionOnClose = true;
+        device.on(Events.AndroidDevice.Close, closePipe);
+        return device;
+      }, deadline);
+      if (!result.timedOut) {
+        return result.result;
+      } else {
+        closePipe();
+        throw new Error(`Timeout ${options.timeout}ms exceeded`);
+      }
+    });
   }
 }
 
 export class AndroidDevice extends ChannelOwner<channels.AndroidDeviceChannel> implements api.AndroidDevice {
   readonly _timeoutSettings: TimeoutSettings;
-  private _webViews = new Map<number, AndroidWebView>();
+  private _webViews = new Map<string, AndroidWebView>();
+  _shouldCloseConnectionOnClose = false;
 
   static from(androidDevice: channels.AndroidDeviceChannel): AndroidDevice {
     return (androidDevice as any)._object;
@@ -68,18 +130,19 @@ export class AndroidDevice extends ChannelOwner<channels.AndroidDeviceChannel> i
     this.input = new AndroidInput(this);
     this._timeoutSettings = new TimeoutSettings((parent as Android)._timeoutSettings);
     this._channel.on('webViewAdded', ({ webView }) => this._onWebViewAdded(webView));
-    this._channel.on('webViewRemoved', ({ pid }) => this._onWebViewRemoved(pid));
+    this._channel.on('webViewRemoved', ({ socketName }) => this._onWebViewRemoved(socketName));
+    this._channel.on('close', () => this._didClose());
   }
 
   private _onWebViewAdded(webView: channels.AndroidWebView) {
     const view = new AndroidWebView(this, webView);
-    this._webViews.set(webView.pid, view);
+    this._webViews.set(webView.socketName, view);
     this.emit(Events.AndroidDevice.WebView, view);
   }
 
-  private _onWebViewRemoved(pid: number) {
-    const view = this._webViews.get(pid);
-    this._webViews.delete(pid);
+  private _onWebViewRemoved(socketName: string) {
+    const view = this._webViews.get(socketName);
+    this._webViews.delete(socketName);
     if (view)
       view.emit(Events.AndroidWebView.Close);
   }
@@ -101,14 +164,18 @@ export class AndroidDevice extends ChannelOwner<channels.AndroidDeviceChannel> i
     return [...this._webViews.values()];
   }
 
-  async webView(selector: { pkg: string }, options?: types.TimeoutOptions): Promise<AndroidWebView> {
-    const webView = [...this._webViews.values()].find(v => v.pkg() === selector.pkg);
+  async webView(selector: { pkg?: string; socketName?: string; }, options?: types.TimeoutOptions): Promise<AndroidWebView> {
+    const predicate = (v: AndroidWebView) => {
+      if (selector.pkg)
+        return v.pkg() === selector.pkg;
+      if (selector.socketName)
+        return v._socketName() === selector.socketName;
+      return false;
+    };
+    const webView = [...this._webViews.values()].find(predicate);
     if (webView)
       return webView;
-    return this.waitForEvent('webview', {
-      ...options,
-      predicate: (view: AndroidWebView) => view.pkg() === selector.pkg
-    });
+    return await this.waitForEvent('webview', { ...options, predicate });
   }
 
   async wait(selector: api.AndroidSelector, options?: { state?: 'gone' } & types.TimeoutOptions) {
@@ -162,20 +229,35 @@ export class AndroidDevice extends ChannelOwner<channels.AndroidDeviceChannel> i
 
   async screenshot(options: { path?: string } = {}): Promise<Buffer> {
     const { binary } = await this._channel.screenshot();
-    const buffer = Buffer.from(binary, 'base64');
     if (options.path)
-      await fs.promises.writeFile(options.path, buffer);
-    return buffer;
+      await fs.promises.writeFile(options.path, binary);
+    return binary;
+  }
+
+  async [Symbol.asyncDispose]() {
+    await this.close();
   }
 
   async close() {
-    await this._channel.close();
-    this.emit(Events.AndroidDevice.Close);
+    try {
+      if (this._shouldCloseConnectionOnClose)
+        this._connection.close();
+      else
+        await this._channel.close();
+    } catch (e) {
+      if (isTargetClosedError(e))
+        return;
+      throw e;
+    }
+  }
+
+  _didClose() {
+    this.emit(Events.AndroidDevice.Close, this);
   }
 
   async shell(command: string): Promise<Buffer> {
     const { result } = await this._channel.shell({ command });
-    return Buffer.from(result, 'base64');
+    return result;
   }
 
   async open(command: string): Promise<AndroidSocket> {
@@ -190,20 +272,22 @@ export class AndroidDevice extends ChannelOwner<channels.AndroidDeviceChannel> i
     await this._channel.push({ file: await loadFile(file), path, mode: options ? options.mode : undefined });
   }
 
-  async launchBrowser(options: types.BrowserContextOptions & { pkg?: string  } = {}): Promise<BrowserContext> {
+  async launchBrowser(options: types.BrowserContextOptions & { pkg?: string } = {}): Promise<BrowserContext> {
     const contextOptions = await prepareBrowserContextParams(options);
-    const { context } = await this._channel.launchBrowser(contextOptions);
-    return BrowserContext.from(context) as BrowserContext;
+    const result = await this._channel.launchBrowser(contextOptions);
+    const context = BrowserContext.from(result.context) as BrowserContext;
+    context._setOptions(contextOptions, {});
+    return context;
   }
 
   async waitForEvent(event: string, optionsOrPredicate: types.WaitForEventOptions = {}): Promise<any> {
-    return this._wrapApiCall(async () => {
+    return await this._wrapApiCall(async () => {
       const timeout = this._timeoutSettings.timeout(typeof optionsOrPredicate === 'function' ? {} : optionsOrPredicate);
       const predicate = typeof optionsOrPredicate === 'function' ? optionsOrPredicate : optionsOrPredicate.predicate;
       const waiter = Waiter.createForEvent(this, event);
       waiter.rejectOnTimeout(timeout, `Timeout ${timeout}ms exceeded while waiting for event "${event}"`);
       if (event !== Events.AndroidDevice.Close)
-        waiter.rejectOnEvent(this, Events.AndroidDevice.Close, new Error('Device closed'));
+        waiter.rejectOnEvent(this, Events.AndroidDevice.Close, () => new TargetClosedError());
       const result = await waiter.waitForEvent(this, event, predicate as any);
       waiter.dispose();
       return result;
@@ -218,23 +302,27 @@ export class AndroidSocket extends ChannelOwner<channels.AndroidSocketChannel> i
 
   constructor(parent: ChannelOwner, type: string, guid: string, initializer: channels.AndroidSocketInitializer) {
     super(parent, type, guid, initializer);
-    this._channel.on('data', ({ data }) => this.emit(Events.AndroidSocket.Data, Buffer.from(data, 'base64')));
+    this._channel.on('data', ({ data }) => this.emit(Events.AndroidSocket.Data, data));
     this._channel.on('close', () => this.emit(Events.AndroidSocket.Close));
   }
 
   async write(data: Buffer): Promise<void> {
-    await this._channel.write({ data: data.toString('base64') });
+    await this._channel.write({ data });
   }
 
   async close(): Promise<void> {
     await this._channel.close();
   }
+
+  async [Symbol.asyncDispose]() {
+    await this.close();
+  }
 }
 
-async function loadFile(file: string | Buffer): Promise<string> {
+async function loadFile(file: string | Buffer): Promise<Buffer> {
   if (isString(file))
-    return fs.promises.readFile(file, { encoding: 'base64' }).toString();
-  return file.toString('base64');
+    return await fs.promises.readFile(file);
+  return file;
 }
 
 export class AndroidInput implements api.AndroidInput {
@@ -334,14 +422,18 @@ export class AndroidWebView extends EventEmitter implements api.AndroidWebView {
     return this._data.pkg;
   }
 
+  _socketName(): string {
+    return this._data.socketName;
+  }
+
   async page(): Promise<Page> {
     if (!this._pagePromise)
       this._pagePromise = this._fetchPage();
-    return this._pagePromise;
+    return await this._pagePromise;
   }
 
   private async _fetchPage(): Promise<Page> {
-    const { context } = await this._device._channel.connectToWebView({ pid: this._data.pid });
+    const { context } = await this._device._channel.connectToWebView({ socketName: this._data.socketName });
     return BrowserContext.from(context).pages()[0];
   }
 }

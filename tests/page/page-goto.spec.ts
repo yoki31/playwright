@@ -16,17 +16,27 @@
  */
 
 import url from 'url';
-import os from 'os';
 import { test as it, expect } from './pageTest';
 import { expectedSSLError } from '../config/utils';
 
-it('should work #smoke', async ({ page, server }) => {
+it('should work @smoke', async ({ page, server }) => {
   await page.goto(server.EMPTY_PAGE);
   expect(page.url()).toBe(server.EMPTY_PAGE);
 });
 
-it('should work with file URL', async ({ page, asset, isAndroid }) => {
+it('should work with file URL', async ({ page, asset, isAndroid, mode }) => {
   it.skip(isAndroid, 'No files on Android');
+  it.skip(mode.startsWith('service'));
+
+  const fileurl = url.pathToFileURL(asset('empty.html')).href;
+  await page.goto(fileurl);
+  expect(page.url().toLowerCase()).toBe(fileurl.toLowerCase());
+  expect(page.frames().length).toBe(1);
+});
+
+it('should work with file URL with subframes', async ({ page, asset, isAndroid, mode }) => {
+  it.skip(isAndroid, 'No files on Android');
+  it.skip(mode.startsWith('service'));
 
   const fileurl = url.pathToFileURL(asset('frames/two-frames.html')).href;
   await page.goto(fileurl);
@@ -68,7 +78,7 @@ it('should work with cross-process that fails before committing', async ({ page,
   expect(error instanceof Error).toBeTruthy();
 });
 
-it('should work with Cross-Origin-Opener-Policy', async ({ page, server, browserName }) => {
+it('should work with Cross-Origin-Opener-Policy', async ({ page, server }) => {
   server.setRoute('/empty.html', (req, res) => {
     res.setHeader('Cross-Origin-Opener-Policy', 'same-origin');
     res.end();
@@ -99,7 +109,42 @@ it('should work with Cross-Origin-Opener-Policy', async ({ page, server, browser
   expect(response.request().failure()).toBeNull();
 });
 
-it('should work with Cross-Origin-Opener-Policy after redirect', async ({ page, server, browserName }) => {
+it('should work with Cross-Origin-Opener-Policy and interception', async ({ page, server }) => {
+  server.setRoute('/empty.html', (req, res) => {
+    res.setHeader('Cross-Origin-Opener-Policy', 'same-origin');
+    res.end();
+  });
+  const requests = new Set();
+  const events = [];
+  page.on('request', r => {
+    events.push('request');
+    requests.add(r);
+  });
+  page.on('requestfailed', r => {
+    events.push('requestfailed');
+    requests.add(r);
+  });
+  page.on('requestfinished', r => {
+    events.push('requestfinished');
+    requests.add(r);
+  });
+  page.on('response', r => {
+    events.push('response');
+    requests.add(r.request());
+  });
+  await page.route('**/*', async route => {
+    await new Promise(f => setTimeout(f, 100));
+    await route.continue();
+  });
+  const response = await page.goto(server.EMPTY_PAGE);
+  expect(page.url()).toBe(server.EMPTY_PAGE);
+  await response.finished();
+  expect(events).toEqual(['request', 'response', 'requestfinished']);
+  expect(requests.size).toBe(1);
+  expect(response.request().failure()).toBeNull();
+});
+
+it('should work with Cross-Origin-Opener-Policy after redirect', async ({ page, server }) => {
   server.setRedirect('/redirect', '/empty.html');
   server.setRoute('/empty.html', (req, res) => {
     res.setHeader('Cross-Origin-Opener-Policy', 'same-origin');
@@ -245,7 +290,6 @@ it('should work when page calls history API in beforeunload', async ({ page, ser
 });
 
 it('should fail when navigating to bad url', async ({ mode, page, browserName }) => {
-  it.fixme(mode === 'service', 'baseURL is inherited from webServer in config');
   let error = null;
   await page.goto('asdfasdf').catch(e => error = e);
   if (browserName === 'chromium' || browserName === 'webkit')
@@ -254,7 +298,7 @@ it('should fail when navigating to bad url', async ({ mode, page, browserName })
     expect(error.message).toContain('Invalid url');
 });
 
-it('should fail when navigating to bad SSL', async ({ page, browserName, httpsServer }) => {
+it('should fail when navigating to bad SSL', async ({ page, browserName, httpsServer, platform }) => {
   // Make sure that network events do not emit 'undefined'.
   // @see https://crbug.com/750469
   page.on('request', request => expect(request).toBeTruthy());
@@ -262,15 +306,15 @@ it('should fail when navigating to bad SSL', async ({ page, browserName, httpsSe
   page.on('requestfailed', request => expect(request).toBeTruthy());
   let error = null;
   await page.goto(httpsServer.EMPTY_PAGE).catch(e => error = e);
-  expect(error.message).toContain(expectedSSLError(browserName));
+  expect(error.message).toMatch(expectedSSLError(browserName, platform));
 });
 
-it('should fail when navigating to bad SSL after redirects', async ({ page, browserName, server, httpsServer }) => {
+it('should fail when navigating to bad SSL after redirects', async ({ page, browserName, server, httpsServer, platform }) => {
   server.setRedirect('/redirect/1.html', '/redirect/2.html');
   server.setRedirect('/redirect/2.html', '/empty.html');
   let error = null;
   await page.goto(httpsServer.PREFIX + '/redirect/1.html').catch(e => error = e);
-  expect(error.message).toContain(expectedSSLError(browserName));
+  expect(error.message).toMatch(expectedSSLError(browserName, platform));
 });
 
 it('should not crash when navigating to bad SSL after a cross origin navigation', async ({ page, server, httpsServer }) => {
@@ -293,16 +337,23 @@ it('should throw if networkidle2 is passed as an option', async ({ page, server 
 it('should fail when main resources failed to load', async ({ page, browserName, isWindows, mode }) => {
   let error = null;
   await page.goto('http://localhost:44123/non-existing-url').catch(e => error = e);
-  if (mode === 'service')
-    expect(error.message).toContain('net::ERR_SOCKS_CONNECTION_FAILED');
-  else if (browserName === 'chromium')
-    expect(error.message).toContain('net::ERR_CONNECTION_REFUSED');
-  else if (browserName === 'webkit' && isWindows)
-    expect(error.message).toContain(`Couldn\'t connect to server`);
-  else if (browserName === 'webkit')
-    expect(error.message).toContain('Could not connect');
-  else
+  if (browserName === 'chromium') {
+    if (mode === 'service2')
+      expect(error.message).toContain('net::ERR_SOCKS_CONNECTION_FAILED');
+    else
+      expect(error.message).toContain('net::ERR_CONNECTION_REFUSED');
+  } else if (browserName === 'webkit' && isWindows && mode === 'service2') {
+    expect(error.message).toContain(`proxy handshake error`);
+  } else if (browserName === 'webkit' && isWindows) {
+    expect(error.message).toContain(`Could not connect to server`);
+  } else if (browserName === 'webkit') {
+    if (mode === 'service2')
+      expect(error.message).toContain('Connection refused');
+    else
+      expect(error.message).toContain('Could not connect');
+  } else {
     expect(error.message).toContain('NS_ERROR_CONNECTION_REFUSED');
+  }
 });
 
 it('should fail when exceeding maximum navigation timeout', async ({ page, server, playwright }) => {
@@ -402,13 +453,107 @@ it('should fail when replaced by another navigation', async ({ page, server, bro
   });
   const error = await page.goto(server.PREFIX + '/empty.html').catch(e => e);
   await anotherPromise;
-  if (browserName === 'chromium')
+  if (browserName === 'chromium') {
     expect(error.message).toContain('net::ERR_ABORTED');
-  else if (browserName === 'webkit')
-    expect(error.message).toContain('cancelled');
-  else
-    expect(error.message).toContain('NS_BINDING_ABORTED');
+  } else if (browserName === 'webkit') {
+    expect(error.message).toContain(`page.goto: Navigation to "${server.PREFIX + '/empty.html'}" is interrupted by another navigation to "${server.PREFIX + '/one-style.html'}"`);
+  } else if (browserName === 'firefox') {
+    // Firefox might yield either NS_BINDING_ABORTED or 'navigation interrupted by another one'
+    expect(error.message.includes(`page.goto: Navigation to "${server.PREFIX + '/empty.html'}" is interrupted by another navigation to "${server.PREFIX + '/one-style.html'}"`) || error.message.includes('NS_BINDING_ABORTED')).toBe(true);
+  }
 });
+
+it('js redirect overrides url bar navigation ', async ({ page, server, browserName, trace }) => {
+  it.info().annotations.push({ type: 'issue', description: 'https://github.com/microsoft/playwright/issues/20749' });
+  it.skip(trace === 'on', 'tracing waits for snapshot that never arrives because pending navigation');
+
+  server.setRoute('/a', (req, res) => {
+    res.writeHead(200, { 'content-type': 'text/html' });
+    res.end(`
+        <body>
+          <script>
+            setTimeout(() => {
+              window.location.pathname = '/c';
+            }, 1000);
+          </script>
+        </body>
+      `);
+  });
+  const events = [];
+  server.setRoute('/b', async (req, res) => {
+    events.push('started b');
+    await new Promise(f => setTimeout(f, 2000));
+    res.writeHead(200, { 'content-type': 'text/html' });
+    res.end(`BBB`);
+    events.push('finished b');
+  });
+  server.setRoute('/c', async (req, res) => {
+    events.push('started c');
+    await new Promise(f => setTimeout(f, 2000));
+    res.writeHead(200, { 'content-type': 'text/html' });
+    res.end(`CCC`);
+    events.push('finished c');
+  });
+  await page.goto(server.PREFIX + '/a');
+  const error = await page.goto(server.PREFIX + '/b').then(r => null, e => e);
+  const expectEvents = (browserName === 'chromium') ?
+    ['started b', 'finished b'] :
+    ['started b', 'started c', 'finished b', 'finished c'];
+  await expect(() => expect(events).toEqual(expectEvents)).toPass();
+  expect(events).toEqual(expectEvents);
+  if (browserName === 'chromium') {
+    // Chromium prioritizes the url bar navigation over the js redirect.
+    expect(error).toBeFalsy();
+    await expect(page).toHaveURL(server.PREFIX + '/b');
+  } else if (browserName === 'webkit') {
+    expect(error.message).toContain(`page.goto: Navigation to "${server.PREFIX + '/b'}" is interrupted by another navigation to "${server.PREFIX + '/c'}"`);
+    await expect(page).toHaveURL(server.PREFIX + '/c');
+  } else if (browserName === 'firefox') {
+    expect(error.message).toContain('NS_BINDING_ABORTED');
+    await expect(page).toHaveURL(server.PREFIX + '/c');
+  }
+});
+
+it('should succeed on url bar navigation when there is pending navigation', async ({ page, server, browserName }) => {
+  it.info().annotations.push({ type: 'issue', description: 'https://github.com/microsoft/playwright/issues/21574' });
+  it.skip(process.env.PW_CLOCK === 'frozen');
+  server.setRoute('/a', (req, res) => {
+    res.writeHead(200, { 'content-type': 'text/html' });
+    res.end(`
+      <body>
+        <script>
+          setTimeout(() => {
+            window.location.pathname = '/c';
+          }, 10);
+        </script>
+      </body>
+    `);
+  });
+  const events = [];
+  server.setRoute('/b', async (req, res) => {
+    events.push('started b');
+    await new Promise(f => setTimeout(f, 2000));
+    res.writeHead(200, { 'content-type': 'text/html' });
+    res.end(`BBB`);
+    events.push('finished b');
+  });
+  server.setRoute('/c', async (req, res) => {
+    events.push('started c');
+    await new Promise(f => setTimeout(f, 2000));
+    res.writeHead(200, { 'content-type': 'text/html' });
+    res.end(`CCC`);
+    events.push('finished c');
+  });
+  await page.goto(server.PREFIX + '/a');
+  await page.waitForTimeout(1000);
+  const error = await page.goto(server.PREFIX + '/b').then(r => null, e => e);
+  const expectEvents = ['started c', 'started b', 'finished c', 'finished b'];
+  await expect(() => expect(events).toEqual(expectEvents)).toPass({ timeout: 5000 });
+  expect(events).toEqual(expectEvents);
+  expect(error).toBeFalsy();
+  expect(page.url()).toBe(server.PREFIX + '/b');
+});
+
 
 it('should work when navigating to valid url', async ({ page, server }) => {
   const response = await page.goto(server.EMPTY_PAGE);
@@ -523,6 +668,21 @@ it('should send referer', async ({ page, server }) => {
   expect(page.url()).toBe(server.PREFIX + '/grid.html');
 });
 
+it('should send referer of cross-origin URL', async ({ page, server }) => {
+  it.info().annotations.push({ type: 'issue', description: 'https://github.com/microsoft/playwright/issues/27765' });
+  const [request1, request2] = await Promise.all([
+    server.waitForRequest('/grid.html'),
+    server.waitForRequest('/digits/1.png'),
+    page.goto(server.PREFIX + '/grid.html', {
+      referer: 'https://microsoft.com/xbox/'
+    }),
+  ]);
+  expect(request1.headers['referer']).toBe('https://microsoft.com/xbox/');
+  // Make sure subresources do not inherit referer.
+  expect(request2.headers['referer']).toBe(server.PREFIX + '/grid.html');
+  expect(page.url()).toBe(server.PREFIX + '/grid.html');
+});
+
 it('should reject referer option when setExtraHTTPHeaders provides referer', async ({ page, server }) => {
   await page.setExtraHTTPHeaders({ 'referer': 'http://microsoft.com/' });
   let error;
@@ -560,8 +720,7 @@ it('should fail when canceled by another navigation', async ({ page, server }) =
   expect(error.message).toBeTruthy();
 });
 
-it('should work with lazy loading iframes', async ({ page, server, isElectron, isAndroid }) => {
-  it.fixme(isElectron);
+it('should work with lazy loading iframes', async ({ page, server, isAndroid }) => {
   it.fixme(isAndroid);
 
   await page.goto(server.PREFIX + '/frames/lazy-frame.html');
@@ -587,7 +746,6 @@ it('should not throw unhandled rejections on invalid url', async ({ page, server
 });
 
 it('should not crash when RTCPeerConnection is used', async ({ page, server, browserName, platform }) => {
-  it.fixme(browserName === 'webkit' && platform === 'darwin' && parseInt(os.release(), 10) === 18, 'Does not work on MacOS 10.14');
   server.setRoute('/rtc.html', (_, res) => {
     res.end(`
       <!DOCTYPE html>
@@ -612,7 +770,6 @@ it('should not crash when RTCPeerConnection is used', async ({ page, server, bro
 });
 
 it('should properly wait for load', async ({ page, server, browserName }) => {
-  it.fixme(browserName === 'webkit', 'WebKit has a bug where Page.frameStoppedLoading is sent too early.');
   server.setRoute('/slow.js', async (req, res) => {
     await new Promise(x => setTimeout(x, 100));
     res.writeHead(200, { 'Content-Type': 'application/javascript' });
@@ -629,13 +786,27 @@ it('should properly wait for load', async ({ page, server, browserName }) => {
   ]);
 });
 
-it('should properly report window.stop()', async ({ page, server, browserName }) => {
-  server.setRoute('/module.js', async (req, res) => void 0);
-  await page.goto(server.PREFIX + '/window-stop.html');
+it('should not resolve goto upon window.stop()', async ({ browserName, page, server }) => {
+  it.fixme(browserName === 'firefox', 'load/domcontentloaded events are flaky');
+  it.skip(process.env.PW_CLOCK === 'frozen');
+
+  let response;
+  server.setRoute('/module.js', (req, res) => {
+    res.writeHead(200, { 'Content-Type': 'text/javascript' });
+    response = res;
+  });
+  let done = false;
+  page.goto(server.PREFIX + '/window-stop.html').then(() => done = true).catch(() => {});
+  await server.waitForRequest('/module.js');
+  expect(done).toBe(false);
+  await page.waitForTimeout(1000);  // give it some time to erroneously resolve
+  response.end('');
+  await page.waitForTimeout(1000);  // give it more time to erroneously resolve
+  expect(done).toBe(false);
 });
 
-it('should return from goto if new navigation is started', async ({ page, server, browserName }) => {
-  it.fixme(browserName === 'webkit', 'WebKit has a bug where Page.frameStoppedLoading is sent too early.');
+it('should return from goto if new navigation is started', async ({ page, server, browserName, isAndroid }) => {
+  it.fixme(isAndroid);
   server.setRoute('/slow.js', async (req, res) => void 0);
   let finished = false;
   const navigation = page.goto(server.PREFIX + '/load-event/load-event.html').then(r => {
@@ -649,15 +820,52 @@ it('should return from goto if new navigation is started', async ({ page, server
 });
 
 it('should return when navigation is committed if commit is specified', async ({ page, server }) => {
+  server.setRoute('/script.js', (req, res) => {});
   server.setRoute('/empty.html', (req, res) => {
-    res.writeHead(200, {
-      'content-type': 'text/html',
-      'content-length': '8192'
-    });
-    // Write enought bytes of the body to trigge response received event.
-    res.write('<title>' + 'A'.repeat(4100));
-    res.uncork();
+    res.setHeader('content-type', 'text/html');
+    res.end('<title>Hello</title><script src="script.js"></script>');
   });
   const response = await page.goto(server.EMPTY_PAGE, { waitUntil: 'commit' });
   expect(response.status()).toBe(200);
+  expect(await page.title()).toBe('Hello');
+});
+
+it('should wait for load when iframe attaches and detaches', async ({ page, server }) => {
+  it.skip(process.env.PW_CLOCK === 'frozen');
+  server.setRoute('/empty.html', (req, res) => {
+    res.writeHead(200, { 'content-type': 'text/html' });
+    res.end(`
+      <body>
+        <script>
+          const iframe = document.createElement('iframe');
+          iframe.src = './iframe.html';
+          document.body.appendChild(iframe);
+          setTimeout(() => iframe.remove(), 1000);
+        </script>
+      </body>
+    `);
+  });
+
+  server.setRoute('/iframe.html', (req, res) => {
+    res.writeHead(200, { 'content-type': 'text/html' });
+    res.end(`
+      <link rel="stylesheet" href="./style2.css">
+    `);
+  });
+
+  // Stall the css so that 'load' does not fire.
+  server.setRoute('/style2.css', () => {});
+
+  const frameDetached = page.waitForEvent('framedetached');
+  const done = page.goto(server.EMPTY_PAGE, { waitUntil: 'load' });
+  await frameDetached; // Make sure that iframe is gone.
+  await done;
+  expect(await page.$('iframe')).toBe(null);
+});
+
+it('should return url with basic auth info', async ({ page, server, loopback }) => {
+  it.info().annotations.push({ type: 'issue', description: 'https://github.com/microsoft/playwright/issues/23138' });
+  const url = `http://admin:admin@${loopback || 'localhost'}:${server.PORT}/empty.html`;
+  await page.goto(url);
+  expect(page.url()).toBe(url);
 });

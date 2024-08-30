@@ -15,7 +15,7 @@
  * limitations under the License.
  */
 
-import { test as it, expect } from './pageTest';
+import { test as it, expect, rafraf } from './pageTest';
 import { verifyViewport } from '../config/utils';
 import path from 'path';
 import fs from 'fs';
@@ -28,6 +28,18 @@ it.describe('element screenshot', () => {
     await page.setViewportSize({ width: 500, height: 500 });
     await page.goto(server.PREFIX + '/grid.html');
     await page.evaluate(() => window.scrollBy(50, 100));
+    const elementHandle = await page.$('.box:nth-of-type(3)');
+    const screenshot = await elementHandle.screenshot();
+    expect(screenshot).toMatchSnapshot('screenshot-element-bounding-box.png');
+  });
+
+  it('should work when main world busts JSON.stringify', async ({ page, server }) => {
+    await page.setViewportSize({ width: 500, height: 500 });
+    await page.goto(server.PREFIX + '/grid.html');
+    await page.evaluate(() => {
+      window.scrollBy(50, 100);
+      JSON.stringify = () => undefined;
+    });
     const elementHandle = await page.$('.box:nth-of-type(3)');
     const screenshot = await elementHandle.screenshot();
     expect(screenshot).toMatchSnapshot('screenshot-element-bounding-box.png');
@@ -51,7 +63,7 @@ it.describe('element screenshot', () => {
     expect(screenshot).toMatchSnapshot('screenshot-element-padding-border.png');
   });
 
-  it('should capture full element when larger than viewport in parallel', async ({ page }) => {
+  it('should capture full element when larger than viewport in parallel', async ({ page, browserName }) => {
     await page.setViewportSize({ width: 500, height: 500 });
 
     await page.setContent(`
@@ -195,26 +207,21 @@ it.describe('element screenshot', () => {
       done = true;
       return buffer;
     });
-    for (let i = 0; i < 10; i++)
-      await page.evaluate(() => new Promise(f => requestAnimationFrame(f)));
+    await rafraf(page, 10);
     expect(done).toBe(false);
     await elementHandle.evaluate(e => e.style.visibility = 'visible');
     const screenshot = await promise;
     expect(screenshot).toMatchSnapshot('screenshot-element-bounding-box.png');
   });
 
-  it('should work for an element with fractional dimensions', async ({ page, isElectron }) => {
-    it.fixme(isElectron, 'Scale is wrong');
-
+  it('should work for an element with fractional dimensions', async ({ page }) => {
     await page.setContent('<div style="width:48.51px;height:19.8px;border:1px solid black;"></div>');
     const elementHandle = await page.$('div');
     const screenshot = await elementHandle.screenshot();
     expect(screenshot).toMatchSnapshot('screenshot-element-fractional.png');
   });
 
-  it('should work for an element with an offset', async ({ page, isElectron }) => {
-    it.fixme(isElectron, 'Scale is wrong');
-
+  it('should work for an element with an offset', async ({ page }) => {
     await page.setContent('<div style="position:absolute; top: 10.3px; left: 20.4px;width:50.3px;height:20.2px;border:1px solid black;"></div>');
     const elementHandle = await page.$('div');
     const screenshot = await elementHandle.screenshot();
@@ -225,10 +232,8 @@ it.describe('element screenshot', () => {
     await page.setViewportSize({ width: 500, height: 500 });
     await page.goto(server.PREFIX + '/grid.html');
     const elementHandle = await page.$('.box:nth-of-type(3)');
-    await elementHandle.evaluate(e => {
-      e.classList.add('animation');
-      return new Promise(f => requestAnimationFrame(() => requestAnimationFrame(f)));
-    });
+    await elementHandle.evaluate(e => e.classList.add('animation'));
+    await rafraf(page);
     const screenshot = await elementHandle.screenshot();
     expect(screenshot).toMatchSnapshot('screenshot-element-bounding-box.png');
   });

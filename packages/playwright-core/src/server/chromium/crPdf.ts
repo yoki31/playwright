@@ -15,9 +15,9 @@
  * limitations under the License.
  */
 
-import { assert } from '../../utils/utils';
-import * as types from '../types';
-import { CRSession } from './crConnection';
+import { assert } from '../../utils';
+import type * as channels from '@protocol/channels';
+import type { CRSession } from './crConnection';
 import { readProtocolStream } from './crProtocolHelper';
 
 const PagePaperFormats: { [key: string]: { width: number, height: number }} = {
@@ -67,7 +67,7 @@ export class CRPDF {
     this._client = client;
   }
 
-  async generate(options: types.PDFOptions = {}): Promise<Buffer> {
+  async generate(options: channels.PagePdfParams): Promise<Buffer> {
     const {
       scale = 1,
       displayHeaderFooter = false,
@@ -78,6 +78,8 @@ export class CRPDF {
       pageRanges = '',
       preferCSSPageSize = false,
       margin = {},
+      tagged = false,
+      outline = false
     } = options;
 
     let paperWidth = 8.5;
@@ -96,7 +98,8 @@ export class CRPDF {
     const marginLeft = convertPrintParameterToInches(margin.left) || 0;
     const marginBottom = convertPrintParameterToInches(margin.bottom) || 0;
     const marginRight = convertPrintParameterToInches(margin.right) || 0;
-
+    const generateDocumentOutline = outline;
+    const generateTaggedPDF = tagged;
     const result = await this._client.send('Page.printToPDF', {
       transferMode: 'ReturnAsStream',
       landscape,
@@ -112,8 +115,10 @@ export class CRPDF {
       marginLeft,
       marginRight,
       pageRanges,
-      preferCSSPageSize
+      preferCSSPageSize,
+      generateTaggedPDF,
+      generateDocumentOutline
     });
-    return await readProtocolStream(this._client, result.stream!, null);
+    return await readProtocolStream(this._client, result.stream!);
   }
 }

@@ -14,27 +14,43 @@
  * limitations under the License.
  */
 
-import { test, TestType, Fixtures } from '@playwright/test';
-import { commonFixtures, CommonFixtures } from './commonFixtures';
-import { serverFixtures, ServerFixtures, ServerWorkerOptions } from './serverFixtures';
-import { coverageTest } from './coverageFixtures';
+import { mergeTests } from '@playwright/test';
+import { test } from '@playwright/test';
+import type { CommonFixtures, CommonWorkerFixtures } from './commonFixtures';
+import { commonFixtures } from './commonFixtures';
+import type { ServerFixtures, ServerWorkerOptions } from './serverFixtures';
+import { serverFixtures } from './serverFixtures';
 import { platformTest } from './platformFixtures';
 import { testModeTest } from './testModeFixtures';
 
-interface TestTypeEx<TestArgs, WorkerArgs> extends TestType<TestArgs, WorkerArgs> {
-  extend<T, W = {}>(fixtures: Fixtures<T, W, TestArgs, WorkerArgs>): TestTypeEx<TestArgs & T, WorkerArgs & W>;
-  _extendTest<T, W>(other: TestType<T, W>): TestTypeEx<TestArgs & T, WorkerArgs & W>;
-}
-type BaseT = (typeof test) extends TestType<infer T, infer W> ? T : never; // eslint-disable-line
-type BaseW = (typeof test) extends TestType<infer T, infer W> ? W : never; // eslint-disable-line
-export const base = test as TestTypeEx<BaseT, BaseW>;
+export const base = test;
 
-export const baseTest = base
-    ._extendTest(coverageTest)
-    ._extendTest(platformTest)
-    ._extendTest(testModeTest)
-    .extend<CommonFixtures>(commonFixtures)
-    .extend<ServerFixtures, ServerWorkerOptions>(serverFixtures)
-    .extend<{}, { _snapshotSuffix: string }>({
-      _snapshotSuffix: ['', { scope: 'worker' }],
+export const baseTest = mergeTests(base, platformTest, testModeTest)
+    .extend<CommonFixtures, CommonWorkerFixtures>(commonFixtures)
+    .extend<ServerFixtures, ServerWorkerOptions>(serverFixtures);
+
+export function step<This extends Object, Args extends any[], Return>(
+  target: (this: This, ...args: Args) => Promise<Return>,
+  context: ClassMethodDecoratorContext<This, (this: This, ...args: Args) => Promise<Return>>
+) {
+  function replacementMethod(this: This, ...args: Args): Promise<Return> {
+    const name = this.constructor.name + '.' + (context.name as string) + '(' + args.map(a => JSON.stringify(a)).join(',') + ')';
+    return test.step(name, async () => {
+      return await target.call(this, ...args);
     });
+  }
+  return replacementMethod;
+}
+
+declare global {
+  interface Window {
+    builtinSetTimeout: WindowOrWorkerGlobalScope['setTimeout'],
+    builtinClearTimeout: WindowOrWorkerGlobalScope['setTimeout'],
+    builtinSetInterval: WindowOrWorkerGlobalScope['setInterval'],
+    builtinClearInterval: WindowOrWorkerGlobalScope['clearInterval'],
+    builtinRequestAnimationFrame: AnimationFrameProvider['requestAnimationFrame'],
+    builtinCancelAnimationFrame: AnimationFrameProvider['cancelAnimationFrame'],
+    builtinPerformance: WindowOrWorkerGlobalScope['performance'],
+    builtinDate: typeof Date,
+  }
+}

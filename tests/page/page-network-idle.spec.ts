@@ -17,7 +17,7 @@
 
 import { test as it, expect } from './pageTest';
 import type { Frame } from 'playwright-core';
-import { TestServer } from '../../utils/testserver';
+import type { TestServer } from '../config/testserver';
 
 it('should navigate to empty page with networkidle', async ({ page, server }) => {
   const response = await page.goto(server.EMPTY_PAGE, { waitUntil: 'networkidle' });
@@ -47,7 +47,7 @@ async function networkIdleTest(frame: Frame, server: TestServer, action: () => P
 
   // Track when the action gets completed.
   let actionFinished = false;
-  actionPromise.then(() => actionFinished = true);
+  void actionPromise.then(() => actionFinished = true);
 
   // Wait for the frame's 'load' event.
   await waitForLoadPromise;
@@ -98,7 +98,7 @@ it('should wait for networkidle to succeed navigation with request from previous
 it('should wait for networkidle in waitForNavigation', async ({ page, server }) => {
   await networkIdleTest(page.mainFrame(), server, () => {
     const promise = page.waitForNavigation({ waitUntil: 'networkidle' });
-    page.goto(server.PREFIX + '/networkidle.html');
+    void page.goto(server.PREFIX + '/networkidle.html');
     return promise;
   });
 });
@@ -138,9 +138,7 @@ it('should wait for networkidle from the child frame', async ({ page, server }) 
   });
 });
 
-it('should wait for networkidle from the popup', async ({ page, server, isAndroid }) => {
-  it.skip(isAndroid, 'Too slow');
-
+it('should wait for networkidle from the popup', async ({ page, server }) => {
   await page.goto(server.EMPTY_PAGE);
   await page.setContent(`
     <button id=box1 onclick="window.open('./popup/popup.html')">Button1</button>
@@ -156,4 +154,55 @@ it('should wait for networkidle from the popup', async ({ page, server, isAndroi
     ]);
     await popup.waitForLoadState('networkidle');
   }
+});
+
+it('should wait for networkidle when iframe attaches and detaches', async ({ page, server }) => {
+  server.setRoute('/empty.html', () => {});
+  let done = false;
+  const promise = page.setContent(`
+    <body>
+      <script>
+        const iframe = document.createElement('iframe');
+        iframe.src = ${JSON.stringify(server.EMPTY_PAGE)};
+        document.body.appendChild(iframe);
+      </script>
+    </body>
+  `, { waitUntil: 'networkidle' }).then(() => done = true);
+  await page.waitForTimeout(600);
+  expect(done).toBe(false);
+  await page.evaluate(() => {
+    document.querySelector('iframe').remove();
+  });
+  await promise;
+  expect(done).toBe(true);
+});
+
+it('should work after repeated navigations in the same page', async ({ page, server }) => {
+  it.info().annotations.push({ type: 'issue', description: 'https://github.com/microsoft/playwright/issues/18283' });
+
+  let requestCount = 0;
+  await page.route('**/empty.html', route => {
+    void route.fulfill({
+      contentType: 'text/html',
+      body: `
+        <script>
+          fetch('http://localhost:8000/sample').then(res => console.log(res.json()))
+        </script>`
+    });
+  });
+
+  await page.route('**/sample', route => {
+    requestCount++;
+    void route.fulfill({
+      contentType: 'application/json',
+      body: JSON.stringify({
+        content: 'sample'
+      })
+    });
+  });
+
+  await page.goto(server.EMPTY_PAGE, { waitUntil: 'networkidle' });
+  expect(requestCount).toBe(1);
+  await page.goto(server.EMPTY_PAGE, { waitUntil: 'networkidle' });
+  expect(requestCount).toBe(2);
 });

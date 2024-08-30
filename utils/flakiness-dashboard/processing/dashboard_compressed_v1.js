@@ -36,12 +36,23 @@ function compressReports(reports) {
     const projectNameToMetadata = new Map();
     if (report.config && report.config.projects) {
       for (const project of report.config.projects) {
-        if (project.metadata.headful === false)
-          delete project.metadata.headful;
+        project.metadata = project.metadata || {};
+        if (project.metadata.headless === 'headless')
+          delete project.metadata.headless;
         if (project.metadata.mode === 'default')
           delete project.metadata.mode;
-        if (project.metadata.platform.toLowerCase() !== 'android')
+        if (project.metadata.clock === 'default')
+          delete project.metadata.clock;
+        if (project.metadata.platform && project.metadata.platform.toLowerCase() !== 'android')
           delete project.metadata.platform;
+        // Cleanup a bunch of data from report that
+        // comes from CI plugin.
+        for (const key of Object.keys(project.metadata)) {
+          if (key.startsWith('ci.') || key.startsWith('revision.'))
+            delete project.metadata[key];
+        }
+        delete project.metadata['timestamp'];
+
         projectNameToMetadata.set(project.name, project.metadata);
       }
     }
@@ -51,11 +62,11 @@ function compressReports(reports) {
         specs = new Map();
         files[spec.file] = specs;
       }
-      const specId = spec.file + '---' + spec.title + ' --- ' + spec.line;
+      const specId = spec.file + '---' + spec.titlePath.join('-') + ' --- ' + spec.line;
       let specObject = specs.get(specId);
       if (!specObject) {
         specObject = {
-          title: spec.title,
+          title: spec.titlePath.join(' › '),
           line: spec.line,
           column: spec.column,
           tests: new Map(),
@@ -107,11 +118,6 @@ function compressReports(reports) {
         }
 
         for (const run of test.results) {
-          // Record duration of slow tests only, i.e. > 1s.
-          if (run.status === 'passed' && run.duration > 1000) {
-            testObject.minTime = Math.min((testObject.minTime || Number.MAX_VALUE), run.duration);
-            testObject.maxTime = Math.max((testObject.maxTime || 0), run.duration);
-          }
           if (run.status === 'failed') {
             if (!Array.isArray(testObject.failed))
               testObject.failed = [];

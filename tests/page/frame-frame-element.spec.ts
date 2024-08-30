@@ -18,7 +18,7 @@
 import { test as it, expect } from './pageTest';
 import { attachFrame } from '../config/utils';
 
-it('should work #smoke', async ({ page, server }) => {
+it('should work @smoke', async ({ page, server }) => {
   await page.goto(server.EMPTY_PAGE);
   const frame1 = await attachFrame(page, 'frame1', server.EMPTY_PAGE);
   await attachFrame(page, 'frame2', server.EMPTY_PAGE);
@@ -54,4 +54,24 @@ it('should throw when detached', async ({ page, server }) => {
   await page.$eval('#frame1', e => e.remove());
   const error = await frame1.frameElement().catch(e => e);
   expect(error.message).toContain('Frame has been detached.');
+});
+
+it('should work inside closed shadow root', async ({ page, server, browserName }) => {
+  await page.goto(server.EMPTY_PAGE);
+  await page.setContent(`
+    <div id=framecontainer>
+    </div>
+    <script>
+      const iframe = document.createElement('iframe');
+      iframe.setAttribute('name', 'myframe');
+      iframe.setAttribute('srcdoc', 'find me');
+      const div = document.getElementById('framecontainer');
+      const host = div.attachShadow({ mode: 'closed' });
+      host.appendChild(iframe);
+    </script>
+  `);
+
+  const frame = page.frame({ name: 'myframe' });
+  const element = await frame.frameElement();
+  expect(await element.getAttribute('name')).toBe('myframe');
 });

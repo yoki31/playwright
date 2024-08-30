@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 set -e
 set +x
 
@@ -8,11 +8,6 @@ if [[ ("$1" == "-h") || ("$1" == "--help") ]]; then
   echo "Generate distributable .zip archive from ./x64 folder that was previously built."
   echo
   exit 0
-fi
-
-if [[ "$(uname)" != MINGW* ]]; then
-  echo "ERROR: this script only supports MINGW (windows)"
-  exit 1
 fi
 
 ZIP_PATH=$1
@@ -36,7 +31,12 @@ fi
 trap "cd $(pwd -P)" EXIT
 cd "$(dirname "$0")"
 
+if [[ "$(uname)" != MINGW* ]]; then
+  echo "ERROR: this script only supports MINGW (windows)"
+  exit 1
+fi
+
+
 # create a TMP directory to copy all necessary files
 cd ./x64/Release
-zip $ZIP_PATH ./PrintDeps.exe
-
+7z a "$ZIP_PATH" ./PrintDeps.exe

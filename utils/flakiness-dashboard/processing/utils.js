@@ -13,22 +13,34 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-const { BlobServiceClient } = require("@azure/storage-blob");
+// @ts-check
+const { DefaultAzureCredential } = require('@azure/identity');
+const { BlobServiceClient } = require('@azure/storage-blob');
+const defaultAzureCredential = new DefaultAzureCredential();
 const zlib = require('zlib');
 const util = require('util');
 
 const gzipAsync = util.promisify(zlib.gzip);
 const gunzipAsync = util.promisify(zlib.gunzip);
 
-const blobServiceClient = BlobServiceClient.fromConnectionString(process.env.AzureWebJobsStorage);
+const AZURE_STORAGE_ACCOUNT = 'folioflakinessdashboard';
 
-function flattenSpecs(suite, result = []) {
+const blobServiceClient = new BlobServiceClient(
+  `https://${AZURE_STORAGE_ACCOUNT}.blob.core.windows.net`,
+  defaultAzureCredential
+);
+
+function flattenSpecs(suite, result = [], titlePaths = []) {
   if (suite.suites) {
-    for (const child of suite.suites)
-      flattenSpecs(child, result);
+    for (const child of suite.suites) {
+      const isFileSuite = child.column === 0 && child.line === 0;
+      flattenSpecs(child, result, (!isFileSuite && child.title) ? [...titlePaths, child.title]: titlePaths);
+    }
   }
-  for (const spec of suite.specs || [])
+  for (const spec of suite.specs || []) {
+    spec.titlePath = [...titlePaths, spec.title];
     result.push(spec);
+  }
   return result;
 }
 

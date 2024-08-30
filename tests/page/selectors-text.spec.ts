@@ -17,16 +17,18 @@
 
 import { test as it, expect } from './pageTest';
 
-it('should work #smoke', async ({ page }) => {
+it('should work @smoke', async ({ page }) => {
   await page.setContent(`<div>yo</div><div>ya</div><div>\nye  </div>`);
   expect(await page.$eval(`text=ya`, e => e.outerHTML)).toBe('<div>ya</div>');
   expect(await page.$eval(`text="ya"`, e => e.outerHTML)).toBe('<div>ya</div>');
   expect(await page.$eval(`text=/^[ay]+$/`, e => e.outerHTML)).toBe('<div>ya</div>');
   expect(await page.$eval(`text=/Ya/i`, e => e.outerHTML)).toBe('<div>ya</div>');
   expect(await page.$eval(`text=ye`, e => e.outerHTML)).toBe('<div>\nye  </div>');
+  expect(await page.getByText('ye').evaluate(e => e.outerHTML)).toContain('>\nye  </div>');
 
   await page.setContent(`<div> ye </div><div>ye</div>`);
   expect(await page.$eval(`text="ye"`, e => e.outerHTML)).toBe('<div> ye </div>');
+  expect(await page.getByText('ye', { exact: true }).first().evaluate(e => e.outerHTML)).toContain('> ye </div>');
 
   await page.setContent(`<div>yo</div><div>"ya</div><div> hello world! </div>`);
   expect(await page.$eval(`text="\\"ya"`, e => e.outerHTML)).toBe('<div>"ya</div>');
@@ -74,6 +76,7 @@ it('should work #smoke', async ({ page }) => {
 
   await page.setContent(`<div>Hi&gt;&gt;<span></span></div>`);
   expect(await page.$eval(`text="Hi>>">>span`, e => e.outerHTML)).toBe(`<span></span>`);
+  expect(await page.$eval(`text=/Hi\\>\\>/ >> span`, e => e.outerHTML)).toBe(`<span></span>`);
 
   await page.setContent(`<div>a<br>b</div><div>a</div>`);
   expect(await page.$eval(`text=a`, e => e.outerHTML)).toBe('<div>a<br>b</div>');
@@ -106,6 +109,10 @@ it('should work #smoke', async ({ page }) => {
   expect(await page.$(`text="lo wo"`)).toBe(null);
   expect((await page.$$(`text=lo \nwo`)).length).toBe(1);
   expect((await page.$$(`text="lo \nwo"`)).length).toBe(0);
+
+  await page.setContent(`<div>let's<span>hello</span></div>`);
+  expect(await page.$eval(`text=/let's/i >> span`, e => e.outerHTML)).toBe('<span>hello</span>');
+  expect(await page.$eval(`text=/let\\'s/i >> span`, e => e.outerHTML)).toBe('<span>hello</span>');
 });
 
 it('should work with :text', async ({ page }) => {
@@ -236,6 +243,12 @@ it('should work with :has-text', async ({ page }) => {
   expect(await page.$eval(`div:has-text("find me") :has-text("maybe me")`, e => e.tagName)).toBe('WRAP');
   expect(await page.$eval(`div:has-text("find me") span:has-text("maybe me")`, e => e.id)).toBe('span2');
 
+  await page.setContent(`<div id=me>hello
+  wo"r>>ld</div>`);
+  expect(await page.$eval(`div:has-text("hello wo\\"r>>ld")`, e => e.id)).toBe('me');
+  expect(await page.$eval(`div:has-text("hello\\a wo\\"r>>ld")`, e => e.id)).toBe('me');
+  expect(await page.locator('div', { hasText: 'hello\nwo"r>>ld' }).getAttribute('id')).toBe('me');
+
   const error1 = await page.$(`:has-text("foo", "bar")`).catch(e => e);
   expect(error1.message).toContain(`"has-text" engine expects a single string`);
   const error2 = await page.$(`:has-text(foo > bar)`).catch(e => e);
@@ -303,6 +316,7 @@ it('should be case sensitive if quotes are specified', async ({ page }) => {
   await page.setContent(`<div>yo</div><div>ya</div><div>\nye  </div>`);
   expect(await page.$eval(`text=yA`, e => e.outerHTML)).toBe('<div>ya</div>');
   expect(await page.$(`text="yA"`)).toBe(null);
+  expect(await page.$(`text= "ya"`)).toBe(null);
 });
 
 it('should search for a substring without quotes', async ({ page }) => {
@@ -410,4 +424,64 @@ it('should work with leading and trailing spaces', async ({ page }) => {
   await page.setContent(`<button> Add widget </button>`);
   await expect(page.locator('text=Add widget')).toBeVisible();
   await expect(page.locator('text= Add widget ')).toBeVisible();
+});
+
+it('should work with unpaired quotes when not at the start', async ({ page }) => {
+  it.info().annotations.push({ type: 'issue', description: 'https://github.com/microsoft/playwright/issues/12719' });
+  await page.setContent(`
+    <div>hello"world<span>yay</span></div>
+    <div>hello'world<span>nay</span></div>
+    <div>hello\`world<span>oh</span></div>
+    <div>hello\`world<span>oh2</span></div>
+  `);
+  expect(await page.$eval('text=lo" >> span', e => e.outerHTML)).toBe('<span>yay</span>');
+  expect(await page.$eval('  text=lo" >> span', e => e.outerHTML)).toBe('<span>yay</span>');
+  expect(await page.$eval('text  =lo" >> span', e => e.outerHTML)).toBe('<span>yay</span>');
+  expect(await page.$eval('text=  lo" >> span', e => e.outerHTML)).toBe('<span>yay</span>');
+  expect(await page.$eval(' text = lo" >> span', e => e.outerHTML)).toBe('<span>yay</span>');
+  expect(await page.$eval('text=o"wor >> span', e => e.outerHTML)).toBe('<span>yay</span>');
+
+  expect(await page.$eval(`text=lo'wor >> span`, e => e.outerHTML)).toBe('<span>nay</span>');
+  expect(await page.$eval(`text=o' >> span`, e => e.outerHTML)).toBe('<span>nay</span>');
+
+  expect(await page.$eval(`text=ello\`wor >> span`, e => e.outerHTML)).toBe('<span>oh</span>');
+  await expect(page.locator(`text=ello\`wor`).locator('span').first()).toHaveText('oh');
+  await expect(page.locator(`text=ello\`wor`).locator('span').nth(1)).toHaveText('oh2');
+
+  expect(await page.$(`text='wor >> span`)).toBe(null);
+  expect(await page.$(`text=" >> span`)).toBe(null);
+  expect(await page.$(`text=\` >> span`)).toBe(null);
+});
+
+it('should work with paired quotes in the middle of selector', async ({ page }) => {
+  it.info().annotations.push({ type: 'issue', description: 'https://github.com/microsoft/playwright/issues/16858' });
+  await page.setContent(`<div>pattern "^-?\\d+$"</div>`);
+  expect(await page.locator(`div >> text=pattern "^-?\\d+$`).isVisible());
+  expect(await page.locator(`div >> text=pattern "^-?\\d+$"`).isVisible());
+  // Should double escape inside quoted text.
+  expect(await page.locator(`div >> text='pattern "^-?\\\\d+$"'`).isVisible());
+  await expect(page.locator(`div >> text=pattern "^-?\\d+$`)).toBeVisible();
+  await expect(page.locator(`div >> text=pattern "^-?\\d+$"`)).toBeVisible();
+  // Should double escape inside quoted text.
+  await expect(page.locator(`div >> text='pattern "^-?\\\\d+$"'`)).toBeVisible();
+});
+
+it('hasText and internal:text should match full node text in strict mode', async ({ page }) => {
+  await page.setContent(`
+    <div id=div1>hello<span>world</span></div>
+    <div id=div2>hello</div>
+  `);
+  await expect(page.getByText('helloworld', { exact: true })).toHaveId('div1');
+  await expect(page.getByText('hello', { exact: true })).toHaveId('div2');
+  await expect(page.locator('div', { hasText: /^helloworld$/ })).toHaveId('div1');
+  await expect(page.locator('div', { hasText: /^hello$/ })).toHaveId('div2');
+
+  await page.setContent(`
+    <div id=div1><span id=span1>hello</span>world</div>
+    <div id=div2><span id=span2>hello</span></div>
+  `);
+  await expect(page.getByText('helloworld', { exact: true })).toHaveId('div1');
+  expect(await page.getByText('hello', { exact: true }).evaluateAll(els => els.map(e => e.id))).toEqual(['span1', 'span2']);
+  await expect(page.locator('div', { hasText: /^helloworld$/ })).toHaveId('div1');
+  await expect(page.locator('div', { hasText: /^hello$/ })).toHaveId('div2');
 });

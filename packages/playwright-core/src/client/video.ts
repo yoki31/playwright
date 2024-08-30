@@ -14,26 +14,24 @@
  * limitations under the License.
  */
 
-import { Page } from './page';
-import * as api from '../../types/types';
-import { Artifact } from './artifact';
-import { Connection } from './connection';
+import type { Page } from './page';
+import type * as api from '../../types/types';
+import type { Artifact } from './artifact';
+import type { Connection } from './connection';
+import { ManualPromise } from '../utils';
 
 export class Video implements api.Video {
   private _artifact: Promise<Artifact | null> | null = null;
-  private _artifactCallback = (artifact: Artifact) => {};
+  private _artifactReadyPromise = new ManualPromise<Artifact>();
   private _isRemote = false;
 
   constructor(page: Page, connection: Connection) {
     this._isRemote = connection.isRemote();
-    this._artifact = Promise.race([
-      new Promise<Artifact>(f => this._artifactCallback = f),
-      page._closedOrCrashedPromise.then(() => null),
-    ]);
+    this._artifact = page._closedOrCrashedScope.safeRace(this._artifactReadyPromise);
   }
 
   _artifactReady(artifact: Artifact) {
-    this._artifactCallback(artifact);
+    this._artifactReadyPromise.resolve(artifact);
   }
 
   async path(): Promise<string> {
@@ -49,7 +47,7 @@ export class Video implements api.Video {
     const artifact = await this._artifact;
     if (!artifact)
       throw new Error('Page did not produce any video frames');
-    return artifact.saveAs(path);
+    return await artifact.saveAs(path);
   }
 
   async delete(): Promise<void> {

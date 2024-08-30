@@ -19,8 +19,8 @@ import { test as it, expect } from './pageTest';
 
 it.skip(({ isAndroid }) => isAndroid);
 
-it('should work', async ({ page, server, browserName, headless }) => {
-  it.fail(browserName === 'firefox' && !headless);
+it('should work', async ({ page, server, browserName, headless, isLinux }) => {
+  it.fixme(browserName === 'firefox' && !headless && !isLinux);
 
   await page.setViewportSize({ width: 500, height: 500 });
   await page.goto(server.PREFIX + '/grid.html');
@@ -40,7 +40,7 @@ it('should handle nested frames', async ({ page, server }) => {
 
 it('should get frame box', async ({ page, browserName }) => {
   it.info().annotations.push({ type: 'issue', description: 'https://github.com/microsoft/playwright/issues/10977' });
-  await page.setViewportSize({ width: 200, height: 200 });
+  await page.setViewportSize({ width: 250, height: 250 });
   await page.setContent(`<style>
   body {
       display: flex;

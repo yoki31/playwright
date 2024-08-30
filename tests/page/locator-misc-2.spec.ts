@@ -16,8 +16,9 @@
  */
 
 import { test as it, expect } from './pageTest';
+import os from 'os';
 
-it('should press #smoke', async ({ page }) => {
+it('should press @smoke', async ({ page }) => {
   await page.setContent(`<input type='text' />`);
   await page.locator('input').press('h');
   expect(await page.$eval('input', input => input.value)).toBe('h');
@@ -42,12 +43,44 @@ it('should scroll into view', async ({ page, server, isAndroid }) => {
   }
 });
 
+it('should scroll zero-sized element into view', async ({ page, isAndroid, isElectron, isWebView2, browserName, isMac }) => {
+  it.fixme(isAndroid || isElectron || isWebView2);
+  it.skip(browserName === 'webkit' && isMac && parseInt(os.release(), 10) < 20, 'WebKit for macOS 10.15 is frozen.');
+
+  await page.setContent(`
+    <style>
+      html,body { margin: 0; padding: 0; }
+      ::-webkit-scrollbar { display: none; }
+      * { scrollbar-width: none; }
+    </style>
+    <div style="height: 2000px; text-align: center; border: 10px solid blue;">
+      <h1>SCROLL DOWN</h1>
+    </div>
+    <div id=lazyload style="font-size:75px; background-color: green;"></div>
+    <script>
+      const lazyLoadElement = document.querySelector('#lazyload');
+      const observer = new IntersectionObserver((entries) => {
+        if (entries.some(entry => entry.isIntersecting)) {
+          lazyLoadElement.textContent = 'LAZY LOADED CONTENT';
+          lazyLoadElement.style.height = '20px';
+          observer.disconnect();
+        }
+      });
+      observer.observe(lazyLoadElement);
+    </script>
+  `);
+  expect(await page.locator('#lazyload').boundingBox()).toEqual({ x: 0, y: 2020, width: 1280, height: 0 });
+  await page.locator('#lazyload').scrollIntoViewIfNeeded();
+  await expect(page.locator('#lazyload')).toHaveText('LAZY LOADED CONTENT');
+  expect(await page.locator('#lazyload').boundingBox()).toEqual({ x: 0, y: 720, width: 1280, height: 20 });
+});
+
 it('should select textarea', async ({ page, server, browserName }) => {
   await page.goto(server.PREFIX + '/input/textarea.html');
   const textarea = page.locator('textarea');
   await textarea.evaluate(textarea => (textarea as HTMLTextAreaElement).value = 'some value');
   await textarea.selectText();
-  if (browserName === 'firefox') {
+  if (browserName === 'firefox' || browserName === 'webkit') {
     expect(await textarea.evaluate(el => (el as HTMLTextAreaElement).selectionStart)).toBe(0);
     expect(await textarea.evaluate(el => (el as HTMLTextAreaElement).selectionEnd)).toBe(10);
   } else {
@@ -61,7 +94,13 @@ it('should type', async ({ page }) => {
   expect(await page.$eval('input', input => input.value)).toBe('hello');
 });
 
-it('should take screenshot', async ({ page, server, browserName, headless, isAndroid }) => {
+it('should pressSequentially', async ({ page }) => {
+  await page.setContent(`<input type='text' />`);
+  await page.locator('input').pressSequentially('hello');
+  expect(await page.$eval('input', input => input.value)).toBe('hello');
+});
+
+it('should take screenshot', async ({ page, server, browserName, headless, isAndroid, mode }) => {
   it.skip(browserName === 'firefox' && !headless);
   it.skip(isAndroid, 'Different dpr. Remove after using 1x scale for screenshots.');
   await page.setViewportSize({ width: 500, height: 500 });
@@ -72,8 +111,8 @@ it('should take screenshot', async ({ page, server, browserName, headless, isAnd
   expect(screenshot).toMatchSnapshot('screenshot-element-bounding-box.png');
 });
 
-it('should return bounding box', async ({ page, server, browserName, headless, isAndroid }) => {
-  it.fail(browserName === 'firefox' && !headless);
+it('should return bounding box', async ({ page, server, browserName, headless, isAndroid, isLinux }) => {
+  it.fixme(browserName === 'firefox' && !headless && !isLinux);
   it.skip(isAndroid);
 
   await page.setViewportSize({ width: 500, height: 500 });
@@ -120,3 +159,21 @@ it('locator.count should work with deleted Map in main world', async ({ page }) 
   await page.locator('#searchResultTableDiv .x-grid3-row').count();
   await expect(page.locator('#searchResultTableDiv .x-grid3-row')).toHaveCount(0);
 });
+
+it('Locator.locator() and FrameLocator.locator() should accept locator', async ({ page }) => {
+  await page.setContent(`
+    <div><input value=outer></div>
+    <iframe srcdoc="<div><input value=inner></div>"></iframe>
+  `);
+
+  const inputLocator = page.locator('input');
+  expect(await inputLocator.inputValue()).toBe('outer');
+  expect(await page.locator('div').locator(inputLocator).inputValue()).toBe('outer');
+  expect(await page.frameLocator('iframe').locator(inputLocator).inputValue()).toBe('inner');
+  expect(await page.frameLocator('iframe').locator('div').locator(inputLocator).inputValue()).toBe('inner');
+
+  const divLocator = page.locator('div');
+  expect(await divLocator.locator('input').inputValue()).toBe('outer');
+  expect(await page.frameLocator('iframe').locator(divLocator).locator('input').inputValue()).toBe('inner');
+});
+

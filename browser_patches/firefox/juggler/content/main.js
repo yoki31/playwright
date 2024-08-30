@@ -2,119 +2,92 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
-const {Services} = ChromeUtils.import("resource://gre/modules/Services.jsm");
 const {Helper} = ChromeUtils.import('chrome://juggler/content/Helper.js');
 const {FrameTree} = ChromeUtils.import('chrome://juggler/content/content/FrameTree.js');
 const {SimpleChannel} = ChromeUtils.import('chrome://juggler/content/SimpleChannel.js');
 const {PageAgent} = ChromeUtils.import('chrome://juggler/content/content/PageAgent.js');
 
-let frameTree;
 const helper = new Helper();
-const messageManager = this;
 
-let pageAgent;
+function initialize(browsingContext, docShell) {
+  const data = { channel: undefined, pageAgent: undefined, frameTree: undefined, failedToOverrideTimezone: false };
 
-let failedToOverrideTimezone = false;
+  const applySetting = {
+    geolocation: (geolocation) => {
+      if (geolocation) {
+        docShell.setGeolocationOverride({
+          coords: {
+            latitude: geolocation.latitude,
+            longitude: geolocation.longitude,
+            accuracy: geolocation.accuracy,
+            altitude: NaN,
+            altitudeAccuracy: NaN,
+            heading: NaN,
+            speed: NaN,
+          },
+          address: null,
+          timestamp: Date.now()
+        });
+      } else {
+        docShell.setGeolocationOverride(null);
+      }
+    },
 
-const applySetting = {
-  geolocation: (geolocation) => {
-    if (geolocation) {
-      docShell.setGeolocationOverride({
-        coords: {
-          latitude: geolocation.latitude,
-          longitude: geolocation.longitude,
-          accuracy: geolocation.accuracy,
-          altitude: NaN,
-          altitudeAccuracy: NaN,
-          heading: NaN,
-          speed: NaN,
-        },
-        address: null,
-        timestamp: Date.now()
-      });
-    } else {
-      docShell.setGeolocationOverride(null);
-    }
-  },
+    bypassCSP: (bypassCSP) => {
+      docShell.bypassCSPEnabled = bypassCSP;
+    },
 
-  onlineOverride: (onlineOverride) => {
-    if (!onlineOverride) {
-      docShell.onlineOverride = Ci.nsIDocShell.ONLINE_OVERRIDE_NONE;
-      return;
-    }
-    docShell.onlineOverride = onlineOverride === 'online' ?
-        Ci.nsIDocShell.ONLINE_OVERRIDE_ONLINE : Ci.nsIDocShell.ONLINE_OVERRIDE_OFFLINE;
-  },
+    timezoneId: (timezoneId) => {
+      data.failedToOverrideTimezone = !docShell.overrideTimezone(timezoneId);
+    },
 
-  bypassCSP: (bypassCSP) => {
-    docShell.bypassCSPEnabled = bypassCSP;
-  },
+    locale: (locale) => {
+      docShell.languageOverride = locale;
+    },
 
-  timezoneId: (timezoneId) => {
-    failedToOverrideTimezone = !docShell.overrideTimezone(timezoneId);
-  },
+    scrollbarsHidden: (hidden) => {
+      data.frameTree.setScrollbarsHidden(hidden);
+    },
 
-  locale: (locale) => {
-    docShell.languageOverride = locale;
-  },
+    javaScriptDisabled: (javaScriptDisabled) => {
+      data.frameTree.setJavaScriptDisabled(javaScriptDisabled);
+    },
+  };
 
-  scrollbarsHidden: (hidden) => {
-    frameTree.setScrollbarsHidden(hidden);
-  },
-
-  colorScheme: (colorScheme) => {
-    frameTree.setColorScheme(colorScheme);
-  },
-
-  reducedMotion: (reducedMotion) => {
-    frameTree.setReducedMotion(reducedMotion);
-  },
-
-  forcedColors: (forcedColors) => {
-    frameTree.setForcedColors(forcedColors);
-  },
-};
-
-const channel = SimpleChannel.createForMessageManager('content::page', messageManager);
-
-function initialize() {
-  const response = sendSyncMessage('juggler:content-ready')[0];
-  // If we didn't get a response, then we don't want to do anything
-  // as a part of this frame script.
-  if (!response)
-    return;
-  const {
-    scriptsToEvaluateOnNewDocument = [],
-    bindings = [],
-    settings = {}
-  } = response || {};
+  const contextCrossProcessCookie = Services.cpmm.sharedData.get('juggler:context-cookie-' + browsingContext.originAttributes.userContextId) || { initScripts: [], bindings: [], settings: {} };
+  const pageCrossProcessCookie = Services.cpmm.sharedData.get('juggler:page-cookie-' + browsingContext.browserId) || { initScripts: [], bindings: [], interceptFileChooserDialog: false };
 
   // Enforce focused state for all top level documents.
   docShell.overrideHasFocus = true;
   docShell.forceActiveState = true;
-  frameTree = new FrameTree(docShell);
-  for (const [name, value] of Object.entries(settings)) {
+  docShell.disallowBFCache = true;
+  data.frameTree = new FrameTree(browsingContext);
+  for (const [name, value] of Object.entries(contextCrossProcessCookie.settings)) {
     if (value !== undefined)
       applySetting[name](value);
   }
-  for (const { worldName, name, script } of bindings)
-    frameTree.addBinding(worldName, name, script);
-  for (const script of scriptsToEvaluateOnNewDocument)
-    frameTree.addScriptToEvaluateOnNewDocument(script);
+  for (const { worldName, name, script } of [...contextCrossProcessCookie.bindings, ...pageCrossProcessCookie.bindings])
+    data.frameTree.addBinding(worldName, name, script);
+  data.frameTree.setInitScripts([...contextCrossProcessCookie.initScripts, ...pageCrossProcessCookie.initScripts]);
+  data.channel = new SimpleChannel('', 'process-' + Services.appinfo.processID);
+  data.pageAgent = new PageAgent(data.channel, data.frameTree);
+  docShell.fileInputInterceptionEnabled = !!pageCrossProcessCookie.interceptFileChooserDialog;
 
-  pageAgent = new PageAgent(messageManager, channel, frameTree);
-
-  channel.register('', {
-    addScriptToEvaluateOnNewDocument(script) {
-      frameTree.addScriptToEvaluateOnNewDocument(script);
+  data.channel.register('', {
+    setInitScripts(scripts) {
+      data.frameTree.setInitScripts(scripts);
     },
 
     addBinding({worldName, name, script}) {
-      frameTree.addBinding(worldName, name, script);
+      data.frameTree.addBinding(worldName, name, script);
     },
 
     applyContextSetting({name, value}) {
       applySetting[name](value);
+    },
+
+    setInterceptFileChooserDialog(enabled) {
+      docShell.fileInputInterceptionEnabled = !!enabled;
     },
 
     ensurePermissions() {
@@ -122,11 +95,10 @@ function initialize() {
     },
 
     hasFailedToOverrideTimezone() {
-      return failedToOverrideTimezone;
+      return data.failedToOverrideTimezone;
     },
 
-    async awaitViewportDimensions({width, height, deviceSizeIsPageSize}) {
-      docShell.deviceSizeIsPageSize = deviceSizeIsPageSize;
+    async awaitViewportDimensions({width, height}) {
       const win = docShell.domWindow;
       if (win.innerWidth === width && win.innerHeight === height)
         return;
@@ -144,14 +116,8 @@ function initialize() {
     },
   });
 
-  const gListeners = [
-    helper.addEventListener(messageManager, 'unload', msg => {
-      helper.removeListeners(gListeners);
-      pageAgent.dispose();
-      frameTree.dispose();
-      channel.dispose();
-    }),
-  ];
+  return data;
 }
 
-initialize();
+var EXPORTED_SYMBOLS = ['initialize'];
+this.initialize = initialize;

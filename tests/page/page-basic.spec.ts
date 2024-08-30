@@ -15,25 +15,32 @@
  * limitations under the License.
  */
 
+import { kTargetClosedErrorMessage } from '../config/errors';
 import { test as it, expect } from './pageTest';
 
-it('should reject all promises when page is closed', async ({ page }) => {
+it('should reject all promises when page is closed', async ({ page, isWebView2, isAndroid }) => {
+  it.skip(isWebView2, 'Page.close() is not supported in WebView2');
+  it.fixme(isAndroid, '"Target crashed" instead of "Target closed"');
+
   let error = null;
   await Promise.all([
     page.evaluate(() => new Promise(r => {})).catch(e => error = e),
     page.close(),
   ]);
-  expect(error.message).toContain('Target closed');
+  expect(error.message).toContain(kTargetClosedErrorMessage);
 });
 
-it('should set the page close state', async ({ page }) => {
+it('should set the page close state', async ({ page, isWebView2 }) => {
+  it.skip(isWebView2, 'Page.close() is not supported in WebView2');
+
   expect(page.isClosed()).toBe(false);
   await page.close();
   expect(page.isClosed()).toBe(true);
 });
 
-it('should pass page to close event', async ({ page, isAndroid }) => {
+it('should pass page to close event', async ({ page, isAndroid, isWebView2 }) => {
   it.fixme(isAndroid);
+  it.skip(isWebView2, 'Page.close() is not supported in WebView2');
 
   const [closedPage] = await Promise.all([
     page.waitForEvent('close'),
@@ -42,8 +49,10 @@ it('should pass page to close event', async ({ page, isAndroid }) => {
   expect(closedPage).toBe(page);
 });
 
-it('should terminate network waiters', async ({ page, server, isAndroid }) => {
+it('should terminate network waiters', async ({ page, server, isAndroid, isWebView2 }) => {
   it.fixme(isAndroid);
+  it.skip(isWebView2, 'Page.close() is not supported in WebView2');
+
   const results = await Promise.all([
     page.waitForRequest(server.EMPTY_PAGE).catch(e => e),
     page.waitForResponse(server.EMPTY_PAGE).catch(e => e),
@@ -51,12 +60,14 @@ it('should terminate network waiters', async ({ page, server, isAndroid }) => {
   ]);
   for (let i = 0; i < 2; i++) {
     const message = results[i].message;
-    expect(message).toContain('Page closed');
+    expect(message).toContain(kTargetClosedErrorMessage);
     expect(message).not.toContain('Timeout');
   }
 });
 
-it('should be callable twice', async ({ page }) => {
+it('should be callable twice', async ({ page, isWebView2 }) => {
+  it.skip(isWebView2, 'Page.close() is not supported in WebView2');
+
   await Promise.all([
     page.close(),
     page.close(),
@@ -90,7 +101,9 @@ it('should provide access to the opener page', async ({ page }) => {
   expect(opener).toBe(page);
 });
 
-it('should return null if parent page has been closed', async ({ page }) => {
+it('should return null if parent page has been closed', async ({ page, isWebView2 }) => {
+  it.skip(isWebView2, 'Page.close() is not supported in WebView2');
+
   const [popup] = await Promise.all([
     page.waitForEvent('popup'),
     page.evaluate(() => window.open('about:blank')),
@@ -122,19 +135,18 @@ it('should pass self as argument to load event', async ({ page }) => {
   expect(eventArg).toBe(page);
 });
 
-it('should fail with error upon disconnect', async ({ page, isAndroid }) => {
+it('should fail with error upon disconnect', async ({ page, isAndroid, isWebView2 }) => {
+  it.skip(isWebView2, 'Page.close() is not supported in WebView2');
   it.fixme(isAndroid);
 
   let error;
   const waitForPromise = page.waitForEvent('download').catch(e => error = e);
   await page.close();
   await waitForPromise;
-  expect(error.message).toContain('Page closed');
+  expect(error.message).toContain(kTargetClosedErrorMessage);
 });
 
-it('page.url should work', async ({ page, server, isElectron }) => {
-  it.fixme(isElectron);
-
+it('page.url should work', async ({ page, server }) => {
   expect(page.url()).toBe('about:blank');
   await page.goto(server.EMPTY_PAGE);
   expect(page.url()).toBe(server.EMPTY_PAGE);
@@ -163,7 +175,9 @@ it('page.close should work with window.close', async function({ page }) {
   await closedPromise;
 });
 
-it('page.close should work with page.close', async function({ page }) {
+it('page.close should work with page.close', async function({ page, isWebView2 }) {
+  it.skip(isWebView2, 'Page.close() is not supported in WebView2');
+
   const closedPromise = new Promise(x => page.on('close', x));
   await page.close();
   await closedPromise;
@@ -239,4 +253,16 @@ it('frame.press should work', async ({ page, server }) => {
   const frame = page.frame('inner');
   await frame.press('textarea', 'a');
   expect(await frame.evaluate(() => document.querySelector('textarea').value)).toBe('a');
+});
+
+it('has navigator.webdriver set to true', async ({ page }) => {
+  expect(await page.evaluate(() => navigator.webdriver)).toBe(true);
+});
+
+it('should iterate over page properties', async ({ page }) => {
+  const props = [];
+  for (const prop in page) {
+    if (page[prop] && typeof page[prop] === 'object')
+      props.push(page[prop][Symbol.iterator]);
+  }
 });

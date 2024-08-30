@@ -15,32 +15,34 @@
  */
 
 import { EventEmitter } from 'events';
-import { createGuid } from '../utils/utils';
+import { createGuid } from '../utils';
+import type { APIRequestContext } from './fetch';
 import type { Browser } from './browser';
 import type { BrowserContext } from './browserContext';
 import type { BrowserType } from './browserType';
 import type { ElementHandle } from './dom';
 import type { Frame } from './frames';
 import type { Page } from './page';
+import type { Playwright } from './playwright';
 
 export type Attribution = {
-  isInternal: boolean,
+  playwright: Playwright;
   browserType?: BrowserType;
   browser?: Browser;
-  context?: BrowserContext;
+  context?: BrowserContext | APIRequestContext;
   page?: Page;
   frame?: Frame;
 };
 
-import { CallMetadata } from '../protocol/callMetadata';
-export { CallMetadata } from '../protocol/callMetadata';
+import type { CallMetadata } from '@protocol/callMetadata';
+export type { CallMetadata } from '@protocol/callMetadata';
 
 export class SdkObject extends EventEmitter {
   guid: string;
   attribution: Attribution;
   instrumentation: Instrumentation;
 
-  protected constructor(parent: SdkObject, guidPrefix?: string, guid?: string) {
+  constructor(parent: SdkObject, guidPrefix?: string, guid?: string) {
     super();
     this.guid = guid || `${guidPrefix || ''}@${createGuid()}`;
     this.setMaxListeners(0);
@@ -50,15 +52,16 @@ export class SdkObject extends EventEmitter {
 }
 
 export interface Instrumentation {
-  addListener(listener: InstrumentationListener, context: BrowserContext | null): void;
+  addListener(listener: InstrumentationListener, context: BrowserContext | APIRequestContext | null): void;
   removeListener(listener: InstrumentationListener): void;
   onBeforeCall(sdkObject: SdkObject, metadata: CallMetadata): Promise<void>;
   onBeforeInputAction(sdkObject: SdkObject, metadata: CallMetadata, element: ElementHandle): Promise<void>;
   onCallLog(sdkObject: SdkObject, metadata: CallMetadata, logName: string, message: string): void;
   onAfterCall(sdkObject: SdkObject, metadata: CallMetadata): Promise<void>;
-  onEvent(sdkObject: SdkObject, metadata: CallMetadata): void;
   onPageOpen(page: Page): void;
   onPageClose(page: Page): void;
+  onBrowserOpen(browser: Browser): void;
+  onBrowserClose(browser: Browser): void;
 }
 
 export interface InstrumentationListener {
@@ -66,17 +69,20 @@ export interface InstrumentationListener {
   onBeforeInputAction?(sdkObject: SdkObject, metadata: CallMetadata, element: ElementHandle): Promise<void>;
   onCallLog?(sdkObject: SdkObject, metadata: CallMetadata, logName: string, message: string): void;
   onAfterCall?(sdkObject: SdkObject, metadata: CallMetadata): Promise<void>;
-  onEvent?(sdkObject: SdkObject, metadata: CallMetadata): void;
   onPageOpen?(page: Page): void;
   onPageClose?(page: Page): void;
+  onBrowserOpen?(browser: Browser): void;
+  onBrowserClose?(browser: Browser): void;
 }
 
 export function createInstrumentation(): Instrumentation {
-  const listeners = new Map<InstrumentationListener, BrowserContext | null>();
+  const listeners = new Map<InstrumentationListener, BrowserContext | APIRequestContext | null>();
   return new Proxy({}, {
-    get: (obj: any, prop: string) => {
+    get: (obj: any, prop: string | symbol) => {
+      if (typeof prop !== 'string')
+        return obj[prop];
       if (prop === 'addListener')
-        return (listener: InstrumentationListener, context: BrowserContext | null) => listeners.set(listener, context);
+        return (listener: InstrumentationListener, context: BrowserContext | APIRequestContext | null) => listeners.set(listener, context);
       if (prop === 'removeListener')
         return (listener: InstrumentationListener) => listeners.delete(listener);
       if (!prop.startsWith('on'))
@@ -91,16 +97,15 @@ export function createInstrumentation(): Instrumentation {
   });
 }
 
-export function internalCallMetadata(): CallMetadata {
+export function serverSideCallMetadata(): CallMetadata {
   return {
     id: '',
-    wallTime: 0,
     startTime: 0,
     endTime: 0,
     type: 'Internal',
     method: '',
     params: {},
     log: [],
-    snapshots: []
+    isServerSide: true,
   };
 }

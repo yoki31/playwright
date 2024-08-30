@@ -16,14 +16,14 @@
  */
 
 import { test as it, expect } from './pageTest';
-import { globToRegex } from '../../packages/playwright-core/lib/client/clientHelper';
+import { globToRegex } from '../../packages/playwright-core/lib/utils/isomorphic/urlMatch';
 import vm from 'vm';
 
-it('should work with navigation #smoke', async ({ page, server }) => {
+it('should work with navigation @smoke', async ({ page, server }) => {
   const requests = new Map();
   await page.route('**/*', route => {
     requests.set(route.request().url().split('/').pop(), route.request());
-    route.continue();
+    void route.continue();
   });
   server.setRedirect('/rrredirect', '/frames/one-frame.html');
   await page.goto(server.PREFIX + '/rrredirect');
@@ -33,9 +33,8 @@ it('should work with navigation #smoke', async ({ page, server }) => {
   expect(requests.get('style.css').isNavigationRequest()).toBe(false);
 });
 
-it('should intercept after a service worker', async ({ page, server, isAndroid, isElectron }) => {
+it('should intercept after a service worker', async ({ page, server, browserName, isAndroid }) => {
   it.skip(isAndroid);
-  it.skip(isElectron);
 
   await page.goto(server.PREFIX + '/serviceworkers/fetchdummy/sw.html');
   await page.evaluate(() => window['activationPromise']);
@@ -47,7 +46,7 @@ it('should intercept after a service worker', async ({ page, server, isAndroid, 
   await page.route('**/foo', route => {
     const slash = route.request().url().lastIndexOf('/');
     const name = route.request().url().substring(slash + 1);
-    route.fulfill({
+    void route.fulfill({
       status: 200,
       contentType: 'text/css',
       body: 'responseFromInterception:' + name
@@ -61,6 +60,14 @@ it('should intercept after a service worker', async ({ page, server, isAndroid, 
   // Page route is not applied to service worker initiated fetch.
   const nonInterceptedResponse = await page.evaluate(() => window['fetchDummy']('passthrough'));
   expect(nonInterceptedResponse).toBe('FAILURE: Not Found');
+
+  // Firefox does not want to fetch the redirect for some reason.
+  if (browserName !== 'firefox') {
+    // Page route is not applied to service worker initiated fetch with redirect.
+    server.setRedirect('/serviceworkers/fetchdummy/passthrough', '/simple.json');
+    const redirectedResponse = await page.evaluate(() => window['fetchDummy']('passthrough'));
+    expect(redirectedResponse).toBe('{"foo": "bar"}\n');
+  }
 });
 
 it('should work with glob', async () => {
@@ -82,9 +89,19 @@ it('should work with glob', async () => {
   expect(globToRegex('foo*').test('foo/bar.js')).toBeFalsy();
   expect(globToRegex('http://localhost:3000/signin-oidc*').test('http://localhost:3000/signin-oidc/foo')).toBeFalsy();
   expect(globToRegex('http://localhost:3000/signin-oidc*').test('http://localhost:3000/signin-oidcnice')).toBeTruthy();
+
+  expect(globToRegex('**/three-columns/settings.html?**id=[a-z]**').test('http://mydomain:8080/blah/blah/three-columns/settings.html?id=settings-e3c58efe-02e9-44b0-97ac-dd138100cf7c&blah')).toBeTruthy();
+
+  expect(globToRegex('\\?')).toEqual(/^\?$/);
+  expect(globToRegex('\\')).toEqual(/^\\$/);
+  expect(globToRegex('\\\\')).toEqual(/^\\$/);
+  expect(globToRegex('\\[')).toEqual(/^\[$/);
+  expect(globToRegex('[a-z]')).toEqual(/^[a-z]$/);
+  expect(globToRegex('$^+.\\*()|\\?\\{\\}\\[\\]')).toEqual(/^\$\^\+\.\*\(\)\|\?\{\}\[\]$/);
 });
 
-it('should intercept network activity from worker', async function({ page, server, isAndroid }) {
+it('should intercept network activity from worker', async function({ page, server, isAndroid, browserName, browserMajorVersion }) {
+  it.skip(browserName === 'firefox' && browserMajorVersion < 114, 'https://github.com/microsoft/playwright/issues/21760');
   it.skip(isAndroid);
 
   await page.goto(server.EMPTY_PAGE);
@@ -105,10 +122,8 @@ it('should intercept network activity from worker', async function({ page, serve
   expect(msg.text()).toBe('intercepted');
 });
 
-it('should intercept network activity from worker 2', async function({ page, server, isElectron, isAndroid, browserName, browserMajorVersion }) {
+it('should intercept network activity from worker 2', async function({ page, server, isAndroid }) {
   it.skip(isAndroid);
-  it.fixme(isElectron);
-  it.fixme(browserName === 'chromium' && browserMajorVersion === 97, '@see https://github.com/microsoft/playwright/issues/10048');
 
   const url = server.PREFIX + '/worker/worker.js';
   await page.route(url, route => {
@@ -125,9 +140,7 @@ it('should intercept network activity from worker 2', async function({ page, ser
   expect(msg.text()).toBe('intercepted');
 });
 
-it('should work with regular expression passed from a different context', async ({ page, server, isElectron }) => {
-  it.skip(isElectron);
-
+it('should work with regular expression passed from a different context', async ({ page, server }) => {
   const ctx = vm.createContext();
   const regexp = vm.runInContext('new RegExp("empty\\.html")', ctx);
   let intercepted = false;
@@ -142,7 +155,7 @@ it('should work with regular expression passed from a different context', async 
     expect(request.resourceType()).toBe('document');
     expect(request.frame() === page.mainFrame()).toBe(true);
     expect(request.frame().url()).toBe('about:blank');
-    route.continue();
+    void route.continue();
     intercepted = true;
   });
 
@@ -152,11 +165,27 @@ it('should work with regular expression passed from a different context', async 
 });
 
 it('should not break remote worker importScripts', async ({ page, server, browserName, browserMajorVersion }) => {
-  it.fixme(browserName && browserMajorVersion < 91);
-
   await page.route('**', async route => {
     await route.continue();
   });
   await page.goto(server.PREFIX + '/worker/worker-http-import.html');
   await page.waitForSelector("#status:has-text('finished')");
+});
+
+it('should disable memory cache when intercepting', async ({ page, server }) => {
+  let interceted = 0;
+  await page.route('**/page.html', route => {
+    ++interceted;
+    void route.fulfill({
+      body: 'success'
+    });
+  });
+  await page.goto(server.PREFIX + '/page.html');
+  expect(await page.locator('body').textContent()).toContain('success');
+  await page.goto(server.EMPTY_PAGE);
+  await expect(page).toHaveURL(server.EMPTY_PAGE);
+  expect(interceted).toBe(1);
+  await page.goBack();
+  await expect(page).toHaveURL(server.PREFIX + '/page.html');
+  expect(interceted).toBe(2);
 });

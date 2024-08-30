@@ -132,7 +132,7 @@ it('should work with clicking target=_blank', async ({ page, server }) => {
   expect(await popup.evaluate(() => document.readyState)).toBe('complete');
 });
 
-it('should wait for load state of newPage', async ({ page, server, isElectron }) => {
+it('should wait for load state of newPage', async ({ page, isElectron }) => {
   it.fixme(isElectron, 'BrowserContext.newPage does not work in Electron');
 
   const [newPage] = await Promise.all([
@@ -169,7 +169,7 @@ it('should work for frame', async ({ page, server }) => {
   await page.goto(server.PREFIX + '/frames/one-frame.html');
   const frame = page.frames()[1];
 
-  const requestPromise = new Promise<Route>(resolve => page.route(server.PREFIX + '/one-style.css',resolve));
+  const requestPromise = new Promise<Route>(resolve => page.route(server.PREFIX + '/one-style.css', resolve));
   await frame.goto(server.PREFIX + '/one-style.html', { waitUntil: 'domcontentloaded' });
   const request = await requestPromise;
   let resolved = false;
@@ -177,6 +177,30 @@ it('should work for frame', async ({ page, server }) => {
   // give the promise a chance to resolve, even though it shouldn't
   await page.evaluate('1');
   expect(resolved).toBe(false);
-  request.continue();
+  await request.continue();
   await loadPromise;
+});
+
+it('should work with javascript: iframe', async ({ page, server, browserName }) => {
+  await page.goto(server.EMPTY_PAGE);
+  await page.setContent(`<iframe src="javascript:false"></iframe>`, { waitUntil: 'commit' });
+  await page.waitForLoadState('domcontentloaded');
+  await page.waitForLoadState('load');
+  await page.waitForLoadState('networkidle');
+});
+
+it('should work with broken data-url iframe', async ({ page, server }) => {
+  await page.goto(server.EMPTY_PAGE);
+  await page.setContent(`<iframe src="data:text/html"></iframe>`, { waitUntil: 'commit' });
+  await page.waitForLoadState('domcontentloaded');
+  await page.waitForLoadState('load');
+  await page.waitForLoadState('networkidle');
+});
+
+it('should work with broken blob-url iframe', async ({ page, server, browserName }) => {
+  await page.goto(server.EMPTY_PAGE);
+  await page.setContent(`<iframe src="blob:"></iframe>`, { waitUntil: 'commit' });
+  await page.waitForLoadState('domcontentloaded');
+  await page.waitForLoadState('load');
+  await page.waitForLoadState('networkidle');
 });

@@ -14,18 +14,23 @@
   limitations under the License.
 */
 
-import type { HTMLReport, TestFileSummary } from '@playwright/test/src/reporters/html';
+import type { FilteredStats, HTMLReport, TestFileSummary } from './types';
 import * as React from 'react';
-import { Filter } from './filter';
+import type { Filter } from './filter';
 import { TestFileView } from './testFileView';
 import './testFileView.css';
+import { msToString } from './utils';
+import { AutoChip } from './chip';
+import { TestErrorView } from './testErrorView';
 
 export const TestFilesView: React.FC<{
   report?: HTMLReport,
   expandedFiles: Map<string, boolean>,
   setExpandedFiles: (value: Map<string, boolean>) => void,
   filter: Filter,
-}> = ({ report, filter, expandedFiles, setExpandedFiles }) => {
+  filteredStats: FilteredStats,
+  projectNames: string[],
+}> = ({ report, filter, expandedFiles, setExpandedFiles, projectNames, filteredStats }) => {
   const filteredFiles = React.useMemo(() => {
     const result: { file: TestFileSummary, defaultExpanded: boolean }[] = [];
     let visibleTests = 0;
@@ -38,6 +43,16 @@ export const TestFilesView: React.FC<{
     return result;
   }, [report, filter]);
   return <>
+    <div className='mt-2 mx-1' style={{ display: 'flex' }}>
+      {projectNames.length === 1 && !!projectNames[0] && <div data-testid='project-name' style={{ color: 'var(--color-fg-subtle)' }}>Project: {projectNames[0]}</div>}
+      {!filter.empty() && <div data-testid='filtered-tests-count' style={{ color: 'var(--color-fg-subtle)', padding: '0 10px' }}>Filtered: {filteredStats.total} {!!filteredStats.total && ('(' + msToString(filteredStats.duration) + ')')}</div>}
+      <div style={{ flex: 'auto' }}></div>
+      <div data-testid='overall-time' style={{ color: 'var(--color-fg-subtle)', marginRight: '10px' }}>{report ? new Date(report.startTime).toLocaleString() : ''}</div>
+      <div data-testid='overall-duration' style={{ color: 'var(--color-fg-subtle)' }}>Total time: {msToString(report?.duration ?? 0)}</div>
+    </div>
+    {report && !!report.errors.length && <AutoChip header='Errors' dataTestId='report-errors'>
+      {report.errors.map((error, index) => <TestErrorView key={'test-report-error-message-' + index} error={error}></TestErrorView>)}
+    </AutoChip>}
     {report && filteredFiles.map(({ file, defaultExpanded }) => {
       return <TestFileView
         key={`file-${file.fileId}`}

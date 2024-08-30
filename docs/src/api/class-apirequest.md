@@ -1,31 +1,44 @@
 # class: APIRequest
-* langs: js, java, python
+* since: v1.16
 
-Exposes API that can be used for the Web API testing. Each Playwright browser context
-has a APIRequestContext instance attached which shares cookies with the page context.
-Its also possible to create a new APIRequestContext instance manually. For more information
-see [here](./class-apirequestcontext).
+Exposes API that can be used for the Web API testing. This class is used for creating
+[APIRequestContext] instance which in turn can be used for sending web requests. An instance
+of this class can be obtained via [`property: Playwright.request`]. For more information
+see [APIRequestContext].
 
 ## async method: APIRequest.newContext
-* langs: js, java, python
+* since: v1.16
 - returns: <[APIRequestContext]>
 
 Creates new instances of [APIRequestContext].
 
+### option: APIRequest.newContext.clientCertificates = %%-context-option-clientCertificates-%%
+* since: 1.46
+
 ### option: APIRequest.newContext.useragent = %%-context-option-useragent-%%
+* since: v1.16
+
 ### option: APIRequest.newContext.extraHTTPHeaders = %%-context-option-extrahttpheaders-%%
+* since: v1.16
+
 ### option: APIRequest.newContext.httpCredentials = %%-context-option-httpcredentials-%%
+* since: v1.16
+
 ### option: APIRequest.newContext.proxy = %%-browser-option-proxy-%%
+* since: v1.16
+
 ### option: APIRequest.newContext.ignoreHTTPSErrors = %%-context-option-ignorehttpserrors-%%
+* since: v1.16
 
 ### option: APIRequest.newContext.timeout
+* since: v1.16
 - `timeout` <[float]>
 
 Maximum time in milliseconds to wait for the response. Defaults to
 `30000` (30 seconds). Pass `0` to disable timeout.
 
-
 ### option: APIRequest.newContext.baseURL
+* since: v1.16
 - `baseURL` <[string]>
 
 Methods like [`method: APIRequestContext.get`] take the base URL into consideration by using the [`URL()`](https://developer.mozilla.org/en-US/docs/Web/API/URL/URL) constructor for building the corresponding URL. Examples:
@@ -34,6 +47,7 @@ Methods like [`method: APIRequestContext.get`] take the base URL into considerat
 * baseURL: `http://localhost:3000/foo` (without trailing slash) and navigating to `./bar.html` results in `http://localhost:3000/bar.html`
 
 ### option: APIRequest.newContext.storageState
+* since: v1.16
 * langs: js, python
 - `storageState` <[path]|[Object]>
   - `cookies` <[Array]<[Object]>>
@@ -57,7 +71,8 @@ file with saved storage, or the value returned by one of [`method: BrowserContex
 [`method: APIRequestContext.storageState`] methods.
 
 ### option: APIRequest.newContext.storageState
-* langs: java
+* since: v1.16
+* langs: java, csharp
 - `storageState` <[string]>
 
 Populates context with given storage state. This option can be used to initialize context with logged-in information
@@ -66,3 +81,4 @@ file with saved storage, or the value returned by one of [`method: BrowserContex
 [`method: APIRequestContext.storageState`] methods.
 
 ### option: APIRequest.newContext.storageStatePath = %%-csharp-java-context-option-storage-state-path-%%
+* since: v1.18

@@ -14,31 +14,52 @@
  * limitations under the License.
  */
 
-import * as structs from '../../types/structs';
-import * as api from '../../types/types';
-import * as channels from '../protocol/channels';
+import type * as structs from '../../types/structs';
+import type * as api from '../../types/types';
+import type * as channels from '@protocol/channels';
 import * as util from 'util';
-import { isRegExp, monotonicTime } from '../utils/utils';
+import { asLocator, isString, monotonicTime } from '../utils';
 import { ElementHandle } from './elementHandle';
-import { Frame } from './frame';
-import { FilePayload, FrameExpectOptions, Rect, SelectOption, SelectOptionOptions, TimeoutOptions } from './types';
+import type { Frame } from './frame';
+import type { FilePayload, FrameExpectOptions, Rect, SelectOption, SelectOptionOptions, TimeoutOptions } from './types';
 import { parseResult, serializeArgument } from './jsHandle';
-import { escapeWithQuotes } from '../utils/stringUtils';
+import { escapeForTextSelector } from '../utils/isomorphic/stringUtils';
+import type { ByRoleOptions } from '../utils/isomorphic/locatorUtils';
+import { getByAltTextSelector, getByLabelSelector, getByPlaceholderSelector, getByRoleSelector, getByTestIdSelector, getByTextSelector, getByTitleSelector } from '../utils/isomorphic/locatorUtils';
+
+export type LocatorOptions = {
+  hasText?: string | RegExp;
+  hasNotText?: string | RegExp;
+  has?: Locator;
+  hasNot?: Locator;
+};
 
 export class Locator implements api.Locator {
-  private _frame: Frame;
-  private _selector: string;
+  _frame: Frame;
+  _selector: string;
 
-  constructor(frame: Frame, selector: string, options?: { hasText?: string | RegExp }) {
+  constructor(frame: Frame, selector: string, options?: LocatorOptions) {
     this._frame = frame;
     this._selector = selector;
 
-    if (options?.hasText) {
-      const text = options.hasText;
-      if (isRegExp(text))
-        this._selector += ` >> :scope:text-matches(${escapeWithQuotes(text.source, '"')}, "${text.flags}")`;
-      else
-        this._selector += ` >> :scope:has-text(${escapeWithQuotes(text, '"')})`;
+    if (options?.hasText)
+      this._selector += ` >> internal:has-text=${escapeForTextSelector(options.hasText, false)}`;
+
+    if (options?.hasNotText)
+      this._selector += ` >> internal:has-not-text=${escapeForTextSelector(options.hasNotText, false)}`;
+
+    if (options?.has) {
+      const locator = options.has;
+      if (locator._frame !== frame)
+        throw new Error(`Inner "has" locator must belong to the same frame.`);
+      this._selector += ` >> internal:has=` + JSON.stringify(locator._selector);
+    }
+
+    if (options?.hasNot) {
+      const locator = options.hasNot;
+      if (locator._frame !== frame)
+        throw new Error(`Inner "hasNot" locator must belong to the same frame.`);
+      this._selector += ` >> internal:has-not=` + JSON.stringify(locator._selector);
     }
   }
 
@@ -46,7 +67,7 @@ export class Locator implements api.Locator {
     timeout = this._frame.page()._timeoutSettings.timeout({ timeout });
     const deadline = timeout ? monotonicTime() + timeout : 0;
 
-    return this._frame._wrapApiCall<R>(async () => {
+    return await this._frame._wrapApiCall<R>(async () => {
       const result = await this._frame._channel.waitForSelector({ selector: this._selector, strict: true, state: 'attached', timeout });
       const handle = ElementHandle.fromNullable(result.element) as ElementHandle<SVGElement | HTMLElement> | null;
       if (!handle)
@@ -59,59 +80,112 @@ export class Locator implements api.Locator {
     });
   }
 
+  _equals(locator: Locator) {
+    return this._frame === locator._frame && this._selector === locator._selector;
+  }
+
+  page() {
+    return this._frame.page();
+  }
+
   async boundingBox(options?: TimeoutOptions): Promise<Rect | null> {
-    return this._withElement(h => h.boundingBox(), options?.timeout);
+    return await this._withElement(h => h.boundingBox(), options?.timeout);
   }
 
   async check(options: channels.ElementHandleCheckOptions = {}) {
-    return this._frame.check(this._selector, { strict: true, ...options });
+    return await this._frame.check(this._selector, { strict: true, ...options });
   }
 
   async click(options: channels.ElementHandleClickOptions = {}): Promise<void> {
-    return this._frame.click(this._selector, { strict: true, ...options });
+    return await this._frame.click(this._selector, { strict: true, ...options });
   }
 
   async dblclick(options: channels.ElementHandleDblclickOptions = {}): Promise<void> {
-    return this._frame.dblclick(this._selector, { strict: true, ...options });
+    return await this._frame.dblclick(this._selector, { strict: true, ...options });
   }
 
   async dispatchEvent(type: string, eventInit: Object = {}, options?: TimeoutOptions) {
-    return this._frame.dispatchEvent(this._selector, type, eventInit, { strict: true, ...options });
+    return await this._frame.dispatchEvent(this._selector, type, eventInit, { strict: true, ...options });
   }
 
   async dragTo(target: Locator, options: channels.FrameDragAndDropOptions = {}) {
-    return this._frame.dragAndDrop(this._selector, target._selector, {
-      ...options,
+    return await this._frame.dragAndDrop(this._selector, target._selector, {
       strict: true,
+      ...options,
     });
   }
 
   async evaluate<R, Arg>(pageFunction: structs.PageFunctionOn<SVGElement | HTMLElement, Arg, R>, arg?: Arg, options?: TimeoutOptions): Promise<R> {
-    return this._withElement(h => h.evaluate(pageFunction, arg), options?.timeout);
+    return await this._withElement(h => h.evaluate(pageFunction, arg), options?.timeout);
   }
 
   async evaluateAll<R, Arg>(pageFunction: structs.PageFunctionOn<Element[], Arg, R>, arg?: Arg): Promise<R> {
-    return this._frame.$$eval(this._selector, pageFunction, arg);
+    return await this._frame.$$eval(this._selector, pageFunction, arg);
   }
 
   async evaluateHandle<R, Arg>(pageFunction: structs.PageFunctionOn<any, Arg, R>, arg?: Arg, options?: TimeoutOptions): Promise<structs.SmartHandle<R>> {
-    return this._withElement(h => h.evaluateHandle(pageFunction, arg), options?.timeout);
+    return await this._withElement(h => h.evaluateHandle(pageFunction, arg), options?.timeout);
   }
 
   async fill(value: string, options: channels.ElementHandleFillOptions = {}): Promise<void> {
-    return this._frame.fill(this._selector, value, { strict: true, ...options });
+    return await this._frame.fill(this._selector, value, { strict: true, ...options });
+  }
+
+  async clear(options: channels.ElementHandleFillOptions = {}): Promise<void> {
+    return await this.fill('', options);
   }
 
   async _highlight() {
-    return this._frame._highlight(this._selector);
+    // VS Code extension uses this one, keep it for now.
+    return await this._frame._highlight(this._selector);
   }
 
-  locator(selector: string, options?: { hasText?: string | RegExp }): Locator {
-    return new Locator(this._frame, this._selector + ' >> ' + selector, options);
+  async highlight() {
+    return await this._frame._highlight(this._selector);
+  }
+
+  locator(selectorOrLocator: string | Locator, options?: LocatorOptions): Locator {
+    if (isString(selectorOrLocator))
+      return new Locator(this._frame, this._selector + ' >> ' + selectorOrLocator, options);
+    if (selectorOrLocator._frame !== this._frame)
+      throw new Error(`Locators must belong to the same frame.`);
+    return new Locator(this._frame, this._selector + ' >> internal:chain=' + JSON.stringify(selectorOrLocator._selector), options);
+  }
+
+  getByTestId(testId: string | RegExp): Locator {
+    return this.locator(getByTestIdSelector(testIdAttributeName(), testId));
+  }
+
+  getByAltText(text: string | RegExp, options?: { exact?: boolean }): Locator {
+    return this.locator(getByAltTextSelector(text, options));
+  }
+
+  getByLabel(text: string | RegExp, options?: { exact?: boolean }): Locator {
+    return this.locator(getByLabelSelector(text, options));
+  }
+
+  getByPlaceholder(text: string | RegExp, options?: { exact?: boolean }): Locator {
+    return this.locator(getByPlaceholderSelector(text, options));
+  }
+
+  getByText(text: string | RegExp, options?: { exact?: boolean }): Locator {
+    return this.locator(getByTextSelector(text, options));
+  }
+
+  getByTitle(text: string | RegExp, options?: { exact?: boolean }): Locator {
+    return this.locator(getByTitleSelector(text, options));
+  }
+
+  getByRole(role: string, options: ByRoleOptions = {}): Locator {
+    return this.locator(getByRoleSelector(role, options));
   }
 
   frameLocator(selector: string): FrameLocator {
     return new FrameLocator(this._frame, this._selector + ' >> ' + selector);
+  }
+
+  filter(options?: LocatorOptions): Locator {
+    return new Locator(this._frame, this._selector, options);
   }
 
   async elementHandle(options?: TimeoutOptions): Promise<ElementHandle<SVGElement | HTMLElement>> {
@@ -119,7 +193,11 @@ export class Locator implements api.Locator {
   }
 
   async elementHandles(): Promise<api.ElementHandle<SVGElement | HTMLElement>[]> {
-    return this._frame.$$(this._selector);
+    return await this._frame.$$(this._selector);
+  }
+
+  contentFrame() {
+    return new FrameLocator(this._frame, this._selector);
   }
 
   first(): Locator {
@@ -134,76 +212,92 @@ export class Locator implements api.Locator {
     return new Locator(this._frame, this._selector + ` >> nth=${index}`);
   }
 
+  and(locator: Locator): Locator {
+    if (locator._frame !== this._frame)
+      throw new Error(`Locators must belong to the same frame.`);
+    return new Locator(this._frame, this._selector + ` >> internal:and=` + JSON.stringify(locator._selector));
+  }
+
+  or(locator: Locator): Locator {
+    if (locator._frame !== this._frame)
+      throw new Error(`Locators must belong to the same frame.`);
+    return new Locator(this._frame, this._selector + ` >> internal:or=` + JSON.stringify(locator._selector));
+  }
+
   async focus(options?: TimeoutOptions): Promise<void> {
-    return this._frame.focus(this._selector, { strict: true, ...options });
+    return await this._frame.focus(this._selector, { strict: true, ...options });
+  }
+
+  async blur(options?: TimeoutOptions): Promise<void> {
+    await this._frame._channel.blur({ selector: this._selector, strict: true, ...options });
   }
 
   async count(): Promise<number> {
-    return this._frame._queryCount(this._selector);
+    return await this._frame._queryCount(this._selector);
   }
 
   async getAttribute(name: string, options?: TimeoutOptions): Promise<string | null> {
-    return this._frame.getAttribute(this._selector, name, { strict: true, ...options });
+    return await this._frame.getAttribute(this._selector, name, { strict: true, ...options });
   }
 
   async hover(options: channels.ElementHandleHoverOptions = {}): Promise<void> {
-    return this._frame.hover(this._selector, { strict: true, ...options });
+    return await this._frame.hover(this._selector, { strict: true, ...options });
   }
 
   async innerHTML(options?: TimeoutOptions): Promise<string> {
-    return this._frame.innerHTML(this._selector, { strict: true, ...options });
+    return await this._frame.innerHTML(this._selector, { strict: true, ...options });
   }
 
   async innerText(options?: TimeoutOptions): Promise<string> {
-    return this._frame.innerText(this._selector, { strict: true, ...options });
+    return await this._frame.innerText(this._selector, { strict: true, ...options });
   }
 
   async inputValue(options?: TimeoutOptions): Promise<string> {
-    return this._frame.inputValue(this._selector, { strict: true, ...options });
+    return await this._frame.inputValue(this._selector, { strict: true, ...options });
   }
 
   async isChecked(options?: TimeoutOptions): Promise<boolean> {
-    return this._frame.isChecked(this._selector, { strict: true, ...options });
+    return await this._frame.isChecked(this._selector, { strict: true, ...options });
   }
 
   async isDisabled(options?: TimeoutOptions): Promise<boolean> {
-    return this._frame.isDisabled(this._selector, { strict: true, ...options });
+    return await this._frame.isDisabled(this._selector, { strict: true, ...options });
   }
 
   async isEditable(options?: TimeoutOptions): Promise<boolean> {
-    return this._frame.isEditable(this._selector, { strict: true, ...options });
+    return await this._frame.isEditable(this._selector, { strict: true, ...options });
   }
 
   async isEnabled(options?: TimeoutOptions): Promise<boolean> {
-    return this._frame.isEnabled(this._selector, { strict: true, ...options });
+    return await this._frame.isEnabled(this._selector, { strict: true, ...options });
   }
 
   async isHidden(options?: TimeoutOptions): Promise<boolean> {
-    return this._frame.isHidden(this._selector, { strict: true, ...options });
+    return await this._frame.isHidden(this._selector, { strict: true, ...options });
   }
 
   async isVisible(options?: TimeoutOptions): Promise<boolean> {
-    return this._frame.isVisible(this._selector, { strict: true, ...options });
+    return await this._frame.isVisible(this._selector, { strict: true, ...options });
   }
 
   async press(key: string, options: channels.ElementHandlePressOptions = {}): Promise<void> {
-    return this._frame.press(this._selector, key, { strict: true, ...options });
+    return await this._frame.press(this._selector, key, { strict: true, ...options });
   }
 
-  async screenshot(options: channels.ElementHandleScreenshotOptions & { path?: string } = {}): Promise<Buffer> {
-    return this._withElement((h, timeout) => h.screenshot({ ...options, timeout }), options.timeout);
+  async screenshot(options: Omit<channels.ElementHandleScreenshotOptions, 'mask'> & { path?: string, mask?: Locator[] } = {}): Promise<Buffer> {
+    return await this._withElement((h, timeout) => h.screenshot({ ...options, timeout }), options.timeout);
   }
 
   async scrollIntoViewIfNeeded(options: channels.ElementHandleScrollIntoViewIfNeededOptions = {}) {
-    return this._withElement((h, timeout) => h.scrollIntoViewIfNeeded({ ...options, timeout }), options.timeout);
+    return await this._withElement((h, timeout) => h.scrollIntoViewIfNeeded({ ...options, timeout }), options.timeout);
   }
 
   async selectOption(values: string | api.ElementHandle | SelectOption | string[] | api.ElementHandle[] | SelectOption[] | null, options: SelectOptionOptions = {}): Promise<string[]> {
-    return this._frame.selectOption(this._selector, values, { strict: true, ...options });
+    return await this._frame.selectOption(this._selector, values, { strict: true, ...options });
   }
 
   async selectText(options: channels.ElementHandleSelectTextOptions = {}): Promise<void> {
-    return this._withElement((h, timeout) => h.selectText({ ...options, timeout }), options.timeout);
+    return await this._withElement((h, timeout) => h.selectText({ ...options, timeout }), options.timeout);
   }
 
   async setChecked(checked: boolean, options?: channels.ElementHandleCheckOptions) {
@@ -214,31 +308,39 @@ export class Locator implements api.Locator {
   }
 
   async setInputFiles(files: string | FilePayload | string[] | FilePayload[], options: channels.ElementHandleSetInputFilesOptions = {}) {
-    return this._frame.setInputFiles(this._selector, files, { strict: true, ...options });
+    return await this._frame.setInputFiles(this._selector, files, { strict: true, ...options });
   }
 
   async tap(options: channels.ElementHandleTapOptions = {}): Promise<void> {
-    return this._frame.tap(this._selector, { strict: true, ...options });
+    return await this._frame.tap(this._selector, { strict: true, ...options });
   }
 
   async textContent(options?: TimeoutOptions): Promise<string | null> {
-    return this._frame.textContent(this._selector, { strict: true, ...options });
+    return await this._frame.textContent(this._selector, { strict: true, ...options });
   }
 
   async type(text: string, options: channels.ElementHandleTypeOptions = {}): Promise<void> {
-    return this._frame.type(this._selector, text, { strict: true, ...options });
+    return await this._frame.type(this._selector, text, { strict: true, ...options });
+  }
+
+  async pressSequentially(text: string, options: channels.ElementHandleTypeOptions = {}): Promise<void> {
+    return await this.type(text, options);
   }
 
   async uncheck(options: channels.ElementHandleUncheckOptions = {}) {
-    return this._frame.uncheck(this._selector, { strict: true, ...options });
+    return await this._frame.uncheck(this._selector, { strict: true, ...options });
+  }
+
+  async all(): Promise<Locator[]> {
+    return new Array(await this.count()).fill(0).map((e, i) => this.nth(i));
   }
 
   async allInnerTexts(): Promise<string[]> {
-    return this._frame.$$eval(this._selector, ee => ee.map(e => (e as HTMLElement).innerText));
+    return await this._frame.$$eval(this._selector, ee => ee.map(e => (e as HTMLElement).innerText));
   }
 
   async allTextContents(): Promise<string[]> {
-    return this._frame.$$eval(this._selector, ee => ee.map(e => e.textContent || ''));
+    return await this._frame.$$eval(this._selector, ee => ee.map(e => e.textContent || ''));
   }
 
   waitFor(options: channels.FrameWaitForSelectorOptions & { state: 'attached' | 'visible' }): Promise<void>;
@@ -247,10 +349,9 @@ export class Locator implements api.Locator {
     await this._frame._channel.waitForSelector({ selector: this._selector, strict: true, omitReturnValue: true, ...options });
   }
 
-  async _expect(expression: string, options: Omit<FrameExpectOptions, 'expectedValue'> & { expectedValue?: any }): Promise<{ matches: boolean, received?: any, log?: string[] }> {
+  async _expect(expression: string, options: Omit<FrameExpectOptions, 'expectedValue'> & { expectedValue?: any }): Promise<{ matches: boolean, received?: any, log?: string[], timedOut?: boolean }> {
     const params: channels.FrameExpectParams = { selector: this._selector, expression, ...options, isNot: !!options.isNot };
-    if (options.expectedValue)
-      params.expectedValue = serializeArgument(options.expectedValue);
+    params.expectedValue = serializeArgument(options.expectedValue);
     const result = (await this._frame._channel.expect(params));
     if (result.received !== undefined)
       result.received = parseResult(result.received);
@@ -262,7 +363,7 @@ export class Locator implements api.Locator {
   }
 
   toString() {
-    return `Locator@${this._selector}`;
+    return asLocator('javascript', this._selector);
   }
 }
 
@@ -275,12 +376,48 @@ export class FrameLocator implements api.FrameLocator {
     this._frameSelector = selector;
   }
 
-  locator(selector: string, options?: { hasText?: string | RegExp }): Locator {
-    return new Locator(this._frame, this._frameSelector + ' >> control=enter-frame >> ' + selector, options);
+  locator(selectorOrLocator: string | Locator, options?: LocatorOptions): Locator {
+    if (isString(selectorOrLocator))
+      return new Locator(this._frame, this._frameSelector + ' >> internal:control=enter-frame >> ' + selectorOrLocator, options);
+    if (selectorOrLocator._frame !== this._frame)
+      throw new Error(`Locators must belong to the same frame.`);
+    return new Locator(this._frame, this._frameSelector + ' >> internal:control=enter-frame >> ' + selectorOrLocator._selector, options);
+  }
+
+  getByTestId(testId: string | RegExp): Locator {
+    return this.locator(getByTestIdSelector(testIdAttributeName(), testId));
+  }
+
+  getByAltText(text: string | RegExp, options?: { exact?: boolean }): Locator {
+    return this.locator(getByAltTextSelector(text, options));
+  }
+
+  getByLabel(text: string | RegExp, options?: { exact?: boolean }): Locator {
+    return this.locator(getByLabelSelector(text, options));
+  }
+
+  getByPlaceholder(text: string | RegExp, options?: { exact?: boolean }): Locator {
+    return this.locator(getByPlaceholderSelector(text, options));
+  }
+
+  getByText(text: string | RegExp, options?: { exact?: boolean }): Locator {
+    return this.locator(getByTextSelector(text, options));
+  }
+
+  getByTitle(text: string | RegExp, options?: { exact?: boolean }): Locator {
+    return this.locator(getByTitleSelector(text, options));
+  }
+
+  getByRole(role: string, options: ByRoleOptions = {}): Locator {
+    return this.locator(getByRoleSelector(role, options));
+  }
+
+  owner() {
+    return new Locator(this._frame, this._frameSelector);
   }
 
   frameLocator(selector: string): FrameLocator {
-    return new FrameLocator(this._frame, this._frameSelector + ' >> control=enter-frame >> ' + selector);
+    return new FrameLocator(this._frame, this._frameSelector + ' >> internal:control=enter-frame >> ' + selector);
   }
 
   first(): FrameLocator {
@@ -294,4 +431,14 @@ export class FrameLocator implements api.FrameLocator {
   nth(index: number): FrameLocator {
     return new FrameLocator(this._frame, this._frameSelector + ` >> nth=${index}`);
   }
+}
+
+let _testIdAttributeName: string = 'data-testid';
+
+export function testIdAttributeName(): string {
+  return _testIdAttributeName;
+}
+
+export function setTestIdAttribute(attributeName: string) {
+  _testIdAttributeName = attributeName;
 }

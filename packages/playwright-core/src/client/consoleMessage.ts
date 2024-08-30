@@ -16,35 +16,40 @@
 
 import * as util from 'util';
 import { JSHandle } from './jsHandle';
-import * as channels from '../protocol/channels';
-import { ChannelOwner } from './channelOwner';
-import * as api from '../../types/types';
+import type * as channels from '@protocol/channels';
+import type * as api from '../../types/types';
+import { Page } from './page';
 
-type ConsoleMessageLocation = channels.ConsoleMessageInitializer['location'];
+type ConsoleMessageLocation = channels.BrowserContextConsoleEvent['location'];
 
-export class ConsoleMessage extends ChannelOwner<channels.ConsoleMessageChannel> implements api.ConsoleMessage {
-  static from(message: channels.ConsoleMessageChannel): ConsoleMessage {
-    return (message as any)._object;
+export class ConsoleMessage implements api.ConsoleMessage {
+
+  private _page: Page | null;
+  private _event: channels.BrowserContextConsoleEvent | channels.ElectronApplicationConsoleEvent;
+
+  constructor(event: channels.BrowserContextConsoleEvent | channels.ElectronApplicationConsoleEvent) {
+    this._page = ('page' in event && event.page) ? Page.from(event.page) : null;
+    this._event = event;
   }
 
-  constructor(parent: ChannelOwner, type: string, guid: string, initializer: channels.ConsoleMessageInitializer) {
-    super(parent, type, guid, initializer);
+  page() {
+    return this._page;
   }
 
   type(): string {
-    return this._initializer.type;
+    return this._event.type;
   }
 
   text(): string {
-    return this._initializer.text;
+    return this._event.text;
   }
 
   args(): JSHandle[] {
-    return this._initializer.args.map(JSHandle.from);
+    return this._event.args.map(JSHandle.from);
   }
 
   location(): ConsoleMessageLocation {
-    return this._initializer.location;
+    return this._event.location;
   }
 
   [util.inspect.custom]() {

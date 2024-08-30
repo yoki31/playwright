@@ -15,11 +15,11 @@
  * limitations under the License.
  */
 
+import fs from 'fs';
 import * as childProcess from 'child_process';
 import * as readline from 'readline';
-import { eventsHelper } from './eventsHelper';
-import { isUnderTest, removeFolders } from './utils';
-import rimraf from 'rimraf';
+import { isUnderTest } from './';
+import { removeFolders } from './fileUtils';
 
 export type Env = {[key: string]: string | number | boolean | undefined};
 
@@ -50,16 +50,84 @@ type LaunchResult = {
 };
 
 export const gracefullyCloseSet = new Set<() => Promise<void>>();
+const killSet = new Set<() => void>();
 
 export async function gracefullyCloseAll() {
   await Promise.all(Array.from(gracefullyCloseSet).map(gracefullyClose => gracefullyClose().catch(e => {})));
 }
 
-// We currently spawn a process per page when recording video in Chromium.
-//  This triggers "too many listeners" on the process object once you have more than 10 pages open.
-const maxListeners = process.getMaxListeners();
-if (maxListeners !== 0)
-  process.setMaxListeners(Math.max(maxListeners || 0, 100));
+export function gracefullyProcessExitDoNotHang(code: number) {
+  // Force exit after 30 seconds.
+  // eslint-disable-next-line no-restricted-properties
+  setTimeout(() => process.exit(code), 30000);
+  // Meanwhile, try to gracefully close all browsers.
+  gracefullyCloseAll().then(() => {
+    // eslint-disable-next-line no-restricted-properties
+    process.exit(code);
+  });
+}
+
+function exitHandler() {
+  for (const kill of killSet)
+    kill();
+}
+
+let sigintHandlerCalled = false;
+function sigintHandler() {
+  const exitWithCode130 = () => {
+    // Give tests a chance to see that launched process did exit and dispatch any async calls.
+    if (isUnderTest()) {
+      // eslint-disable-next-line no-restricted-properties
+      setTimeout(() => process.exit(130), 1000);
+    } else {
+      // eslint-disable-next-line no-restricted-properties
+      process.exit(130);
+    }
+  };
+
+  if (sigintHandlerCalled) {
+    // Resort to default handler from this point on, just in case we hang/stall.
+    process.off('SIGINT', sigintHandler);
+
+    // Upon second Ctrl+C, immediately kill browsers and exit.
+    // This prevents hanging in the case where closing the browser takes a lot of time or is buggy.
+    for (const kill of killSet)
+      kill();
+    exitWithCode130();
+  } else {
+    sigintHandlerCalled = true;
+    gracefullyCloseAll().then(() => exitWithCode130());
+  }
+}
+
+function sigtermHandler() {
+  gracefullyCloseAll();
+}
+
+function sighupHandler() {
+  gracefullyCloseAll();
+}
+
+const installedHandlers = new Set<'exit' | 'SIGINT' | 'SIGTERM' | 'SIGHUP'>();
+const processHandlers = {
+  exit: exitHandler,
+  SIGINT: sigintHandler,
+  SIGTERM: sigtermHandler,
+  SIGHUP: sighupHandler,
+};
+function addProcessHandlerIfNeeded(name: 'exit' | 'SIGINT' | 'SIGTERM' | 'SIGHUP') {
+  if (!installedHandlers.has(name)) {
+    installedHandlers.add(name);
+    process.on(name, processHandlers[name]);
+  }
+}
+function removeProcessHandlersIfNeeded() {
+  if (killSet.size)
+    return;
+  for (const handler of installedHandlers)
+    process.off(handler, processHandlers[handler]);
+  installedHandlers.clear();
+}
 
 export async function launchProcess(options: LaunchProcessOptions): Promise<LaunchResult> {
   const stdio: ('ignore' | 'pipe')[] = options.stdio === 'pipe' ? ['ignore', 'pipe', 'pipe', 'pipe', 'pipe'] : ['pipe', 'pipe', 'pipe'];
@@ -110,50 +178,39 @@ export async function launchProcess(options: LaunchProcessOptions): Promise<Laun
   });
 
   let processClosed = false;
-  let fulfillClose = () => {};
-  const waitForClose = new Promise<void>(f => fulfillClose = f);
   let fulfillCleanup = () => {};
   const waitForCleanup = new Promise<void>(f => fulfillCleanup = f);
   spawnedProcess.once('exit', (exitCode, signal) => {
     options.log(`[pid=${spawnedProcess.pid}] <process did exit: exitCode=${exitCode}, signal=${signal}>`);
     processClosed = true;
-    eventsHelper.removeEventListeners(listeners);
     gracefullyCloseSet.delete(gracefullyClose);
+    killSet.delete(killProcessAndCleanup);
+    removeProcessHandlersIfNeeded();
     options.onExit(exitCode, signal);
-    fulfillClose();
     // Cleanup as process exits.
     cleanup().then(fulfillCleanup);
   });
 
-  const listeners = [ eventsHelper.addEventListener(process, 'exit', killProcessAndCleanup) ];
-  if (options.handleSIGINT) {
-    listeners.push(eventsHelper.addEventListener(process, 'SIGINT', () => {
-      gracefullyClose().then(() => {
-        // Give tests a chance to dispatch any async calls.
-        if (isUnderTest())
-          setTimeout(() => process.exit(130), 0);
-        else
-          process.exit(130);
-      });
-    }));
-  }
+  addProcessHandlerIfNeeded('exit');
+  if (options.handleSIGINT)
+    addProcessHandlerIfNeeded('SIGINT');
   if (options.handleSIGTERM)
-    listeners.push(eventsHelper.addEventListener(process, 'SIGTERM', gracefullyClose));
+    addProcessHandlerIfNeeded('SIGTERM');
   if (options.handleSIGHUP)
-    listeners.push(eventsHelper.addEventListener(process, 'SIGHUP', gracefullyClose));
+    addProcessHandlerIfNeeded('SIGHUP');
   gracefullyCloseSet.add(gracefullyClose);
+  killSet.add(killProcessAndCleanup);
 
   let gracefullyClosing = false;
   async function gracefullyClose(): Promise<void> {
-    gracefullyCloseSet.delete(gracefullyClose);
     // We keep listeners until we are done, to handle 'exit' and 'SIGINT' while
     // asynchronously closing to prevent zombie processes. This might introduce
     // reentrancy to this function, for example user sends SIGINT second time.
     // In this case, let's forcefully kill the process.
     if (gracefullyClosing) {
-      options.log(`[pid=${spawnedProcess.pid}] <forecefully close>`);
+      options.log(`[pid=${spawnedProcess.pid}] <forcefully close>`);
       killProcess();
-      await waitForClose;  // Ensure the process is dead and we called options.onkill.
+      await waitForCleanup;  // Ensure the process is dead and we have cleaned up.
       return;
     }
     gracefullyClosing = true;
@@ -163,17 +220,19 @@ export async function launchProcess(options: LaunchProcessOptions): Promise<Laun
     options.log(`[pid=${spawnedProcess.pid}] <gracefully close end>`);
   }
 
-  // This method has to be sync to be used as 'exit' event handler.
+  // This method has to be sync to be used in the 'exit' event handler.
   function killProcess() {
+    gracefullyCloseSet.delete(gracefullyClose);
+    killSet.delete(killProcessAndCleanup);
+    removeProcessHandlersIfNeeded();
     options.log(`[pid=${spawnedProcess.pid}] <kill>`);
-    eventsHelper.removeEventListeners(listeners);
     if (spawnedProcess.pid && !spawnedProcess.killed && !processClosed) {
       options.log(`[pid=${spawnedProcess.pid}] <will force kill>`);
       // Force kill the browser.
       try {
         if (process.platform === 'win32') {
-          const taskkillProcess = childProcess.spawnSync(`taskkill /pid ${spawnedProcess.pid} /T /F /FI "MEMUSAGE gt 0"`, { shell: true });
-          const [stderr, stdout] = [taskkillProcess.stdout.toString(), taskkillProcess.stderr.toString()];
+          const taskkillProcess = childProcess.spawnSync(`taskkill /pid ${spawnedProcess.pid} /T /F`, { shell: true });
+          const [stdout, stderr] = [taskkillProcess.stdout.toString(), taskkillProcess.stderr.toString()];
           if (stdout)
             options.log(`[pid=${spawnedProcess.pid}] taskkill stdout: ${stdout}`);
           if (stderr)
@@ -195,7 +254,7 @@ export async function launchProcess(options: LaunchProcessOptions): Promise<Laun
     options.log(`[pid=${spawnedProcess.pid || 'N/A'}] starting temporary directories cleanup`);
     for (const dir of options.tempDirectories) {
       try {
-        rimraf.sync(dir, { maxBusyTries: 10 });
+        fs.rmSync(dir, { force: true, recursive: true, maxRetries: 5 });
       } catch (e) {
         options.log(`[pid=${spawnedProcess.pid || 'N/A'}] exception while removing ${dir}: ${e}`);
       }

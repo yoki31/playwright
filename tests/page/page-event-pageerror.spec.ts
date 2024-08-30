@@ -70,7 +70,7 @@ it('should contain the Error.name property', async ({ page }) => {
   const [error] = await Promise.all([
     page.waitForEvent('pageerror'),
     page.evaluate(() => {
-      setTimeout(() => {
+      window.builtinSetTimeout(() => {
         const error = new Error('my-message');
         error.name = 'my-name';
         throw error;
@@ -85,7 +85,7 @@ it('should support an empty Error.name property', async ({ page }) => {
   const [error] = await Promise.all([
     page.waitForEvent('pageerror'),
     page.evaluate(() => {
-      setTimeout(() => {
+      window.builtinSetTimeout(() => {
         const error = new Error('my-message');
         error.name = '';
         throw error;
@@ -106,7 +106,9 @@ it('should handle odd values', async ({ page }) => {
   for (const [value, message] of cases) {
     const [error] = await Promise.all([
       page.waitForEvent('pageerror'),
-      page.evaluate(value => setTimeout(() => { throw value; }, 0), value),
+      page.evaluate(value => {
+        window.builtinSetTimeout(() => { throw value; }, 0);
+      }, value),
     ]);
     expect(error.message).toBe(message);
   }
@@ -115,16 +117,36 @@ it('should handle odd values', async ({ page }) => {
 it('should handle object', async ({ page, browserName }) => {
   const [error] = await Promise.all([
     page.waitForEvent('pageerror'),
-    page.evaluate(() => setTimeout(() => { throw {}; }, 0)),
+    page.evaluate(() => {
+      window.builtinSetTimeout(() => { throw {}; }, 0);
+    }),
   ]);
   expect(error.message).toBe(browserName === 'chromium' ? 'Object' : '[object Object]');
 });
 
-it('should handle window', async ({ page, browserName, isElectron }) => {
-  it.skip(isElectron);
+it('should handle window', async ({ page, browserName }) => {
   const [error] = await Promise.all([
     page.waitForEvent('pageerror'),
-    page.evaluate(() => setTimeout(() => { throw window; }, 0)),
+    page.evaluate(() => {
+      window.builtinSetTimeout(() => { throw window; }, 0);
+    }),
   ]);
   expect(error.message).toBe(browserName === 'chromium' ? 'Window' : '[object Window]');
+});
+
+it('should remove a listener of a non-existing event handler', async ({ page }) => {
+  page.removeListener('pageerror', () => {});
+});
+
+it('should emit error from unhandled rejects', async ({ page, browserName }) => {
+  it.info().annotations.push({ type: 'issue', description: 'https://github.com/microsoft/playwright/issues/14165' });
+  const [error] = await Promise.all([
+    page.waitForEvent('pageerror'),
+    page.setContent(`
+        <script>
+          Promise.reject(new Error('sad :('));
+        </script>
+    `),
+  ]);
+  expect(error.message).toContain('sad :(');
 });

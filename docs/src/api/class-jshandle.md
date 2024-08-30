@@ -1,4 +1,5 @@
 # class: JSHandle
+* since: v1.8
 
 JSHandle represents an in-page JavaScript object. JSHandles can be created with the [`method: Page.evaluateHandle`]
 method.
@@ -35,15 +36,18 @@ JSHandle instances can be used as an argument in [`method: Page.evalOnSelector`]
 [`method: Page.evaluateHandle`] methods.
 
 ## method: JSHandle.asElement
+* since: v1.8
 - returns: <[null]|[ElementHandle]>
 
 Returns either `null` or the object handle itself, if the object handle is an instance of [ElementHandle].
 
 ## async method: JSHandle.dispose
+* since: v1.8
 
 The `jsHandle.dispose` method stops referencing the element handle.
 
 ## async method: JSHandle.evaluate
+* since: v1.8
 - returns: <[Serializable]>
 
 Returns the return value of [`param: expression`].
@@ -53,7 +57,7 @@ This method passes this handle as the first argument to [`param: expression`].
 If [`param: expression`] returns a [Promise], then `handle.evaluate` would wait for the promise to resolve and return
 its value.
 
-Examples:
+**Usage**
 
 ```js
 const tweetHandle = await page.$('.tweet .retweets');
@@ -81,13 +85,19 @@ Assert.AreEqual("10 retweets", await tweetHandle.EvaluateAsync("node => node.inn
 ```
 
 ### param: JSHandle.evaluate.expression = %%-evaluate-expression-%%
+* since: v1.8
+
+### param: JSHandle.evaluate.expression = %%-js-evaluate-pagefunction-%%
+* since: v1.8
 
 ### param: JSHandle.evaluate.arg
-- `arg` <[EvaluationArgument]>
+* since: v1.8
+- `arg` ?<[EvaluationArgument]>
 
 Optional argument to pass to [`param: expression`].
 
 ## async method: JSHandle.evaluateHandle
+* since: v1.8
 - returns: <[JSHandle]>
 
 Returns the return value of [`param: expression`] as a [JSHandle].
@@ -102,19 +112,27 @@ for the promise to resolve and return its value.
 See [`method: Page.evaluateHandle`] for more details.
 
 ### param: JSHandle.evaluateHandle.expression = %%-evaluate-expression-%%
+* since: v1.8
+
+### param: JSHandle.evaluateHandle.expression = %%-js-evaluate-pagefunction-%%
+* since: v1.8
 
 ### param: JSHandle.evaluateHandle.arg
-- `arg` <[EvaluationArgument]>
+* since: v1.8
+- `arg` ?<[EvaluationArgument]>
 
 Optional argument to pass to [`param: expression`].
 
 ## async method: JSHandle.getProperties
+* since: v1.8
 - returns: <[Map]<[string], [JSHandle]>>
 
 The method returns a map with **own property names** as keys and JSHandle instances for the property values.
 
+**Usage**
+
 ```js
-const handle = await page.evaluateHandle(() => ({window, document}));
+const handle = await page.evaluateHandle(() => ({ window, document }));
 const properties = await handle.getProperties();
 const windowHandle = properties.get('window');
 const documentHandle = properties.get('document');
@@ -122,7 +140,7 @@ await handle.dispose();
 ```
 
 ```java
-JSHandle handle = page.evaluateHandle("() => ({window, document}"););
+JSHandle handle = page.evaluateHandle("() => ({ window, document })");
 Map<String, JSHandle> properties = handle.getProperties();
 JSHandle windowHandle = properties.get("window");
 JSHandle documentHandle = properties.get("document");
@@ -130,7 +148,7 @@ handle.dispose();
 ```
 
 ```python async
-handle = await page.evaluate_handle("{window, document}")
+handle = await page.evaluate_handle("({ window, document })")
 properties = await handle.get_properties()
 window_handle = properties.get("window")
 document_handle = properties.get("document")
@@ -138,7 +156,7 @@ await handle.dispose()
 ```
 
 ```python sync
-handle = page.evaluate_handle("{window, document}")
+handle = page.evaluate_handle("({ window, document })")
 properties = handle.get_properties()
 window_handle = properties.get("window")
 document_handle = properties.get("document")
@@ -146,7 +164,7 @@ handle.dispose()
 ```
 
 ```csharp
-var handle = await page.EvaluateHandleAsync("() => ({window, document}");
+var handle = await page.EvaluateHandleAsync("() => ({ window, document }");
 var properties = await handle.GetPropertiesAsync();
 var windowHandle = properties["window"];
 var documentHandle = properties["document"];
@@ -154,16 +172,19 @@ await handle.DisposeAsync();
 ```
 
 ## async method: JSHandle.getProperty
+* since: v1.8
 - returns: <[JSHandle]>
 
 Fetches a single property from the referenced object.
 
 ### param: JSHandle.getProperty.propertyName
+* since: v1.8
 - `propertyName` <[string]>
 
 property to get
 
 ## async method: JSHandle.jsonValue
+* since: v1.8
 - returns: <[Serializable]>
 
 Returns a JSON representation of the object. If the object has a `toJSON` function, it **will not be called**.

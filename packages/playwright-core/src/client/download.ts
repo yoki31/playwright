@@ -14,10 +14,10 @@
  * limitations under the License.
  */
 
-import { Readable } from 'stream';
-import * as api from '../../types/types';
-import { Artifact } from './artifact';
-import { Page } from './page';
+import type { Readable } from 'stream';
+import type * as api from '../../types/types';
+import type { Artifact } from './artifact';
+import type { Page } from './page';
 
 export class Download implements api.Download {
   private _page: Page;
@@ -44,27 +44,27 @@ export class Download implements api.Download {
     return this._suggestedFilename;
   }
 
-  async path(): Promise<string | null> {
-    return this._artifact.pathAfterFinished();
+  async path(): Promise<string> {
+    return await this._artifact.pathAfterFinished();
   }
 
   async saveAs(path: string): Promise<void> {
-    return this._artifact.saveAs(path);
+    return await this._artifact.saveAs(path);
   }
 
   async failure(): Promise<string | null> {
-    return this._artifact.failure();
+    return await this._artifact.failure();
   }
 
-  async createReadStream(): Promise<Readable | null> {
-    return this._artifact.createReadStream();
+  async createReadStream(): Promise<Readable> {
+    return await this._artifact.createReadStream();
   }
 
   async cancel(): Promise<void> {
-    return this._artifact.cancel();
+    return await this._artifact.cancel();
   }
 
   async delete(): Promise<void> {
-    return this._artifact.delete();
+    return await this._artifact.delete();
   }
 }

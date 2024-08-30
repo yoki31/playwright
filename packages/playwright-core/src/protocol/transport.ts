@@ -14,7 +14,7 @@
  * limitations under the License.
  */
 
-import { makeWaitForNextTask } from '../utils/utils';
+import { makeWaitForNextTask } from '../utils';
 
 export interface WritableStream {
   write(data: Buffer): void;
@@ -29,7 +29,7 @@ export interface ClosableStream {
   close(): void;
 }
 
-export class Transport {
+export class PipeTransport {
   private _pipeWrite: WritableStream;
   private _data = Buffer.from([]);
   private _waitForNextTask = makeWaitForNextTask();

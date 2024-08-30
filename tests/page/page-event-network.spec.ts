@@ -15,10 +15,11 @@
  * limitations under the License.
  */
 
-import type { ServerResponse } from '../../utils/testserver';
+import type { ServerResponse } from 'http';
 import { test as it, expect } from './pageTest';
+import { kTargetClosedErrorMessage } from '../config/errors';
 
-it('Page.Events.Request #smoke', async ({ page, server }) => {
+it('Page.Events.Request @smoke', async ({ page, server }) => {
   const requests = [];
   page.on('request', request => requests.push(request));
   await page.goto(server.EMPTY_PAGE);
@@ -31,7 +32,7 @@ it('Page.Events.Request #smoke', async ({ page, server }) => {
   expect(requests[0].frame().url()).toBe(server.EMPTY_PAGE);
 });
 
-it('Page.Events.Response #smoke', async ({ page, server }) => {
+it('Page.Events.Response @smoke', async ({ page, server }) => {
   const responses = [];
   page.on('response', response => responses.push(response));
   await page.goto(server.EMPTY_PAGE);
@@ -42,7 +43,7 @@ it('Page.Events.Response #smoke', async ({ page, server }) => {
   expect(responses[0].request()).toBeTruthy();
 });
 
-it('Page.Events.RequestFailed #smoke', async ({ page, server, browserName, isMac, isWindows }) => {
+it('Page.Events.RequestFailed @smoke', async ({ page, server, browserName, platform }) => {
   server.setRoute('/one-style.css', (req, res) => {
     res.setHeader('Content-Type', 'text/css');
     res.connection.destroy();
@@ -57,19 +58,19 @@ it('Page.Events.RequestFailed #smoke', async ({ page, server, browserName, isMac
   if (browserName === 'chromium') {
     expect(failedRequests[0].failure().errorText).toBe('net::ERR_EMPTY_RESPONSE');
   } else if (browserName === 'webkit') {
-    if (isMac)
+    if (platform === 'linux')
+      expect(failedRequests[0].failure().errorText).toMatch(/(Message Corrupt)|(Connection terminated unexpectedly)/i);
+    else if (platform === 'darwin')
       expect(failedRequests[0].failure().errorText).toBe('The network connection was lost.');
-    else if (isWindows)
+    else if (platform === 'win32')
       expect(failedRequests[0].failure().errorText).toBe('Server returned nothing (no headers, no data)');
-    else
-      expect(failedRequests[0].failure().errorText).toBe('Message Corrupt');
   } else {
     expect(failedRequests[0].failure().errorText).toBe('NS_ERROR_NET_RESET');
   }
   expect(failedRequests[0].frame()).toBeTruthy();
 });
 
-it('Page.Events.RequestFinished #smoke', async ({ page, server }) => {
+it('Page.Events.RequestFinished @smoke', async ({ page, server }) => {
   const [response] = await Promise.all([
     page.goto(server.EMPTY_PAGE),
     page.waitForEvent('requestfinished')
@@ -132,8 +133,28 @@ it('should resolve responses after a navigation', async ({ page, server, browser
   const responsePromise = request.response();
   // navigate, which should cancel the request
   await page.goto(server.CROSS_PROCESS_PREFIX);
-  // make sure we arent stalling this request on the server
+  // make sure we aren't stalling this request on the server
   responseFromServer.end('done');
   // the response should resolve to null, because the page navigated.
   expect(await responsePromise).toBe(null);
+});
+
+it('interrupt request.response() and request.allHeaders() on page.close', async ({ page, server, browserName }) => {
+  it.info().annotations.push({ type: 'issue', description: 'https://github.com/microsoft/playwright/issues/27227' });
+  server.setRoute('/one-style.css', (req, res) => {
+    res.setHeader('Content-Type', 'text/css');
+  });
+  const reqPromise = page.waitForRequest('**/one-style.css');
+  await page.goto(server.PREFIX + '/one-style.html', { waitUntil: 'domcontentloaded' });
+  const req = await reqPromise;
+  const respPromise = req.response().catch(e => e);
+  const headersPromise = req.allHeaders().catch(e => e);
+  await page.close();
+  expect((await respPromise).message).toContain(kTargetClosedErrorMessage);
+  // All headers are the same as "provisional" headers in Firefox.
+  if (browserName === 'firefox')
+    expect((await headersPromise)['user-agent']).toBeTruthy();
+  else
+    expect((await headersPromise).message).toContain(kTargetClosedErrorMessage);
+
 });

@@ -23,9 +23,9 @@ it('should work', async ({ page, server }) => {
   const [request] = await Promise.all([
     page.waitForRequest(server.PREFIX + '/digits/2.png'),
     page.evaluate(() => {
-      fetch('/digits/1.png');
-      fetch('/digits/2.png');
-      fetch('/digits/3.png');
+      void fetch('/digits/1.png');
+      void fetch('/digits/2.png');
+      void fetch('/digits/3.png');
     })
   ]);
   expect(request.url()).toBe(server.PREFIX + '/digits/2.png');
@@ -36,9 +36,9 @@ it('should work with predicate', async ({ page, server }) => {
   const [request] = await Promise.all([
     page.waitForEvent('request', request => request.url() === server.PREFIX + '/digits/2.png'),
     page.evaluate(() => {
-      fetch('/digits/1.png');
-      fetch('/digits/2.png');
-      fetch('/digits/3.png');
+      void fetch('/digits/1.png');
+      void fetch('/digits/2.png');
+      void fetch('/digits/3.png');
     })
   ]);
   expect(request.url()).toBe(server.PREFIX + '/digits/2.png');
@@ -62,18 +62,18 @@ it('should respect default timeout', async ({ page, playwright }) => {
 });
 
 it('should log the url', async ({ page }) => {
-  const error = await page.waitForRequest('long-long-long-long-long-long-long-long-long-long-long-long-long-long.css', { timeout: 100 }).catch(e => e);
-  expect(error.message).toContain('waiting for request "long-long-long-long-long-long-long-long-long-long-…"');
+  const error = await page.waitForRequest('long-long-long-long-long-long-long-long-long-long-long-long-long-long.css', { timeout: 1000 }).catch(e => e);
+  expect(error.message).toContain('waiting for request "long-long-long-long-long-long-long-long-long-long…"');
 });
 
 it('should work with no timeout', async ({ page, server }) => {
   await page.goto(server.EMPTY_PAGE);
   const [request] = await Promise.all([
     page.waitForRequest(server.PREFIX + '/digits/2.png', { timeout: 0 }),
-    page.evaluate(() => setTimeout(() => {
-      fetch('/digits/1.png');
-      fetch('/digits/2.png');
-      fetch('/digits/3.png');
+    page.evaluate(() => window.builtinSetTimeout(() => {
+      void fetch('/digits/1.png');
+      void fetch('/digits/2.png');
+      void fetch('/digits/3.png');
     }, 50))
   ]);
   expect(request.url()).toBe(server.PREFIX + '/digits/2.png');
@@ -84,7 +84,7 @@ it('should work with url match', async ({ page, server }) => {
   const [request] = await Promise.all([
     page.waitForRequest(/digits\/\d\.png/),
     page.evaluate(() => {
-      fetch('/digits/1.png');
+      void fetch('/digits/1.png');
     })
   ]);
   expect(request.url()).toBe(server.PREFIX + '/digits/1.png');
@@ -98,7 +98,7 @@ it('should work with url match regular expression from a different context', asy
   const [request] = await Promise.all([
     page.waitForRequest(regexp),
     page.evaluate(() => {
-      fetch('/digits/1.png');
+      void fetch('/digits/1.png');
     })
   ]);
   expect(request.url()).toBe(server.PREFIX + '/digits/1.png');

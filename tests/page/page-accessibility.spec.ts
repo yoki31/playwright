@@ -15,10 +15,11 @@
  * limitations under the License.
  */
 
+import os from 'os';
 import { test as it, expect } from './pageTest';
 import { chromiumVersionLessThan } from '../config/utils';
 
-it('should work #smoke', async ({ page, browserName }) => {
+it('should work @smoke', async ({ page, browserName }) => {
   await page.setContent(`
   <head>
     <title>Accessibility Test</title>
@@ -74,7 +75,8 @@ it('should work #smoke', async ({ page, browserName }) => {
       { role: 'textbox', name: 'Input with whitespace', value: '  ' },
       { role: 'textbox', name: '', value: 'value only' },
       { role: 'textbox', name: 'placeholder', value: 'and a value' },
-      { role: 'textbox', name: 'This is a description!',value: 'and a value' }, // webkit uses the description over placeholder for the name
+      // due to frozen WebKit on macOS 11 we have the if/else here
+      { role: 'textbox', name: parseInt(os.release(), 10) >= 21 ? 'placeholder' : 'This is a description!', value: 'and a value' }, // webkit uses the description over placeholder for the name
     ]
   };
   expect(await page.accessibility.snapshot()).toEqual(golden);
@@ -102,9 +104,10 @@ it('orientation', async ({ page }) => {
 });
 
 it('autocomplete', async ({ page }) => {
-  await page.setContent('<div role="textbox" aria-autocomplete="list">hi</div>');
+  await page.setContent('<div role="textbox" aria-autocomplete="list" aria-haspopup="menu">hi</div>');
   const snapshot = await page.accessibility.snapshot();
   expect(snapshot.children[0].autocomplete).toEqual('list');
+  expect(snapshot.children[0].haspopup).toEqual('menu');
 });
 
 it('multiselectable', async ({ page }) => {
@@ -140,8 +143,9 @@ it('should not report text nodes inside controls', async function({ page, browse
   expect(await page.accessibility.snapshot()).toEqual(golden);
 });
 
-it('rich text editable fields should have children', async function({ page, browserName }) {
+it('rich text editable fields should have children', async function({ page, browserName, browserVersion, isWebView2 }) {
   it.skip(browserName === 'webkit', 'WebKit rich text accessibility is iffy');
+  it.skip(isWebView2, 'WebView2 is missing a Chromium fix');
 
   await page.setContent(`
   <div contenteditable="true">
@@ -163,9 +167,9 @@ it('rich text editable fields should have children', async function({ page, brow
     value: 'Edit this image: ',
     children: [{
       role: 'text',
-      name: 'Edit this image:'
+      name: chromiumVersionLessThan(browserVersion, '108.0.5325.0') ? 'Edit this image:' : 'Edit this image: '
     }, {
-      role: 'img',
+      role: chromiumVersionLessThan(browserVersion, '117.0.5927.0') ? 'img' : 'image',
       name: 'my fake image'
     }]
   };
@@ -173,8 +177,9 @@ it('rich text editable fields should have children', async function({ page, brow
   expect(snapshot.children[0]).toEqual(golden);
 });
 
-it('rich text editable fields with role should have children', async function({ page, browserName, browserMajorVersion }) {
+it('rich text editable fields with role should have children', async function({ page, browserName, browserVersion, isWebView2 }) {
   it.skip(browserName === 'webkit', 'WebKit rich text accessibility is iffy');
+  it.skip(isWebView2, 'WebView2 is missing a Chromium fix');
 
   await page.setContent(`
   <div contenteditable="true" role='textbox'>
@@ -191,14 +196,17 @@ it('rich text editable fields with role should have children', async function({ 
   } : {
     role: 'textbox',
     name: '',
-    multiline: (browserName === 'chromium' && browserMajorVersion >= 92) ? true : undefined,
+    multiline: (browserName === 'chromium') ? true : undefined,
     value: 'Edit this image: ',
-    children: [{
+    children: (chromiumVersionLessThan(browserVersion, '104.0.1293.1') && browserName === 'chromium') ? [{
       role: 'text',
       name: 'Edit this image:'
     }, {
       role: 'img',
       name: 'my fake image'
+    }] : [{
+      role: 'text',
+      name: chromiumVersionLessThan(browserVersion, '108.0.5325.0') ? 'Edit this image:' : 'Edit this image: '
     }]
   };
   const snapshot = await page.accessibility.snapshot();
@@ -297,9 +305,9 @@ it('should work on a menu', async ({ page, browserName, browserVersion }) => {
     role: 'menu',
     name: 'My Menu',
     children:
-    [ { role: 'menuitem', name: 'First Item' },
+    [{ role: 'menuitem', name: 'First Item' },
       { role: 'menuitem', name: 'Second Item' },
-      { role: 'menuitem', name: 'Third Item' } ],
+      { role: 'menuitem', name: 'Third Item' }],
     orientation: (browserName === 'webkit' || (browserName === 'chromium' && !chromiumVersionLessThan(browserVersion, '98.0.1089'))) ? 'vertical' : undefined
   });
 });
@@ -339,4 +347,21 @@ it('should work when there is a title ', async ({ page }) => {
   const snapshot = await page.accessibility.snapshot();
   expect(snapshot.name).toBe('This is the title');
   expect(snapshot.children[0].name).toBe('This is the content');
+});
+
+it('should work with aria-invalid accessibility tree', async ({ page, browserName, server }) => {
+  await page.goto(server.EMPTY_PAGE);
+  await page.setContent(`<a href="/hi" aria-invalid="true">WHO WE ARE</a>`);
+  expect(await page.accessibility.snapshot()).toEqual({
+    'role': browserName === 'firefox' ? 'document' : 'WebArea',
+    'name': '',
+    'children': [
+      {
+        'role': 'link',
+        'name': 'WHO WE ARE',
+        'invalid': 'true',
+        'value': browserName === 'firefox' ?  `${server.PREFIX}/hi` : undefined
+      }
+    ]
+  });
 });
